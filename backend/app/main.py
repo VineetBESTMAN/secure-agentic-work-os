@@ -1,16 +1,18 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import agent, approvals, audit, auth, connectors, documents, health, mcp
+from app.api.routes import agent, approvals, audit, auth, connectors, documents, health, jobs, mcp, policies
 from app.core.config import get_settings
 from app.core.database import initialize_database
 from app.services.approval import approval_service
+from app.services.policies import policy_service
 from app.services.users import user_service
 
 settings = get_settings()
 initialize_database()
 user_service.seed_demo_users()
 approval_service.seed_demo_request()
+policy_service.seed_defaults()
 
 app = FastAPI(
     title=settings.app_name,
@@ -34,3 +36,5 @@ app.include_router(approvals.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
+app.include_router(policies.router, prefix="/api")
+app.include_router(jobs.router, prefix="/api")

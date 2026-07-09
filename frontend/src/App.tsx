@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
+  Bot,
   CheckCircle2,
+  ClipboardList,
   Database,
   Eye,
   FileUp,
@@ -79,6 +81,40 @@ type ConnectorRecord = {
   scopes: string[];
 };
 
+type PolicyRecord = {
+  policy_id: string;
+  name: string;
+  description: string;
+  rule_type: string;
+  effect: string;
+  conditions: Record<string, unknown>;
+  enabled: boolean;
+};
+
+type JobRecord = {
+  job_id: string;
+  job_type: string;
+  status: "queued" | "running" | "completed" | "failed";
+  detail: Record<string, unknown>;
+  result: Record<string, unknown>;
+};
+
+type AgentWorkflowRecord = {
+  workflow_id: string;
+  prompt: string;
+  status: "planned" | "waiting_for_approval" | "completed" | "blocked";
+  plan: {
+    summary: string;
+    actions: {
+      action_id: string;
+      action_type: string;
+      description: string;
+      requires_approval: boolean;
+      scope: string;
+    }[];
+  };
+};
+
 const API_BASE = "http://127.0.0.1:8000";
 
 export default function App() {
@@ -95,7 +131,14 @@ export default function App() {
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorRecord[]>([]);
+  const [policies, setPolicies] = useState<PolicyRecord[]>([]);
+  const [jobs, setJobs] = useState<JobRecord[]>([]);
+  const [workflows, setWorkflows] = useState<AgentWorkflowRecord[]>([]);
   const [query, setQuery] = useState("What does this document say about urgent work?");
+  const [agentPrompt, setAgentPrompt] = useState("Find urgent client work and send a reply");
+  const [connectorContent, setConnectorContent] = useState(
+    "Google Drive note: client renewal needs a follow-up task this week.",
+  );
   const [answer, setAnswer] = useState<RagAnswer | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [classification, setClassification] = useState("internal");
@@ -135,11 +178,14 @@ export default function App() {
     setDocuments(documentData);
     setApprovals(approvalData);
     setConnectors(connectorData);
+    setWorkflows(await api<AgentWorkflowRecord[]>("/api/agent/workflows"));
     if (user?.scopes.includes("audit:read")) {
       setAuditEvents(await api<AuditEvent[]>("/api/audit/events"));
     }
     if (user?.role === "admin" || user?.role === "manager") {
       setUnsafeDocuments(await api<DocumentRecord[]>("/api/documents/unsafe"));
+      setPolicies(await api<PolicyRecord[]>("/api/policies"));
+      setJobs(await api<JobRecord[]>("/api/jobs"));
     }
   }
 
@@ -335,6 +381,54 @@ export default function App() {
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Connector failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importGoogleDriveNote() {
+    setBusy(true);
+    try {
+      const result = await api<{
+        job: JobRecord;
+        imported_documents: DocumentRecord[];
+      }>("/api/connectors/import", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "google",
+          items: [
+            {
+              filename: "google-drive-note.txt",
+              content: connectorContent,
+              classification: "internal",
+              owner_team: "workspace",
+            },
+          ],
+        }),
+      });
+      setMessage(
+        `Imported ${result.imported_documents.length} Google Drive item through ${result.job.job_id}.`,
+      );
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Import failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAgentWorkflow(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const workflow = await api<AgentWorkflowRecord>("/api/agent/workflows", {
+        method: "POST",
+        body: JSON.stringify({ prompt: agentPrompt }),
+      });
+      setMessage(`Workflow ${workflow.workflow_id} is ${workflow.status}.`);
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Workflow failed");
     } finally {
       setBusy(false);
     }
@@ -610,6 +704,17 @@ export default function App() {
                 </article>
               ))}
             </div>
+            <label>
+              Google Drive import text
+              <textarea
+                value={connectorContent}
+                onChange={(event) => setConnectorContent(event.target.value)}
+              />
+            </label>
+            <button type="button" onClick={importGoogleDriveNote} disabled={!token || busy}>
+              <Plug size={16} />
+              Import Drive note
+            </button>
           </section>
 
           <section className="panel">
@@ -625,6 +730,68 @@ export default function App() {
                 </article>
               ))}
               {auditEvents.length === 0 && <p className="empty">No audit events loaded.</p>}
+            </div>
+          </section>
+        </section>
+
+        <section className="columns">
+          <section className="panel">
+            <div className="panel-title">
+              <Bot size={18} />
+              <h2>Agent Workflows</h2>
+            </div>
+            <form className="stack" onSubmit={createAgentWorkflow}>
+              <textarea
+                value={agentPrompt}
+                onChange={(event) => setAgentPrompt(event.target.value)}
+              />
+              <button type="submit" disabled={!token || busy}>
+                <Bot size={16} />
+                Create workflow
+              </button>
+            </form>
+            <div className="item-list">
+              {workflows.map((workflow) => (
+                <article key={workflow.workflow_id} className="item">
+                  <strong>{workflow.status}</strong>
+                  <span>{workflow.prompt}</span>
+                  <small>{workflow.plan.summary}</small>
+                  {workflow.plan.actions.map((action) => (
+                    <small key={action.action_id}>
+                      {action.action_type} | {action.requires_approval ? "approval" : "safe"}
+                    </small>
+                  ))}
+                </article>
+              ))}
+              {workflows.length === 0 && <p className="empty">No workflows created yet.</p>}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-title">
+              <ClipboardList size={18} />
+              <h2>Policies And Jobs</h2>
+            </div>
+            <div className="item-list compact">
+              {policies.map((policy) => (
+                <article key={policy.policy_id} className="item">
+                  <strong>{policy.name}</strong>
+                  <span>
+                    {policy.rule_type} | {policy.effect} | {policy.enabled ? "enabled" : "disabled"}
+                  </span>
+                </article>
+              ))}
+              {jobs.map((job) => (
+                <article key={job.job_id} className="item">
+                  <strong>{job.job_type}</strong>
+                  <span>
+                    {job.status} | {JSON.stringify(job.result)}
+                  </span>
+                </article>
+              ))}
+              {policies.length === 0 && jobs.length === 0 && (
+                <p className="empty">No policy or job data loaded.</p>
+              )}
             </div>
           </section>
         </section>

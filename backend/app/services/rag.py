@@ -24,6 +24,7 @@ from app.models.schemas import (
     RagAnswer,
 )
 from app.services.embeddings import embedding_service
+from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
 
 STOP_WORDS = {
@@ -358,7 +359,11 @@ class RagService:
         return self.get_document(document_id=document_id)
 
     def can_access_document(self, document: DocumentRecord, role: str) -> bool:
-        return role == "admin" or document.classification != "restricted"
+        return policy_service.document_access_allowed(
+            user=None,
+            role=role,
+            classification=document.classification,
+        )
 
     def answer(self, question: str, role: str) -> RagAnswer:
         query_embedding = embedding_service.embed(question)

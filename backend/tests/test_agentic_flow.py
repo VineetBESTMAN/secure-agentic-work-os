@@ -94,6 +94,46 @@ def test_unsafe_documents_are_reviewable() -> None:
     assert "unsafe instructions" in titles
 
 
+def test_policy_job_connector_import_and_agent_workflow_foundations() -> None:
+    headers = _auth_headers()
+
+    policies = client.get("/api/policies", headers=headers)
+    assert policies.status_code == 200
+    assert any(policy["rule_type"] == "tool_approval" for policy in policies.json())
+
+    connector_import = client.post(
+        "/api/connectors/import",
+        headers=headers,
+        json={
+            "provider": "google",
+            "items": [
+                {
+                    "filename": "drive-client-note.txt",
+                    "content": "Google Drive note: client renewal needs a task this week.",
+                    "classification": "internal",
+                    "owner_team": "sales",
+                }
+            ],
+        },
+    )
+    assert connector_import.status_code == 200
+    assert connector_import.json()["job"]["status"] == "completed"
+    assert connector_import.json()["imported_documents"][0]["title"] == "drive client note"
+
+    jobs = client.get("/api/jobs", headers=headers)
+    assert jobs.status_code == 200
+    assert any(job["job_type"] == "google.import" for job in jobs.json())
+
+    workflow = client.post(
+        "/api/agent/workflows",
+        headers=headers,
+        json={"prompt": "Find urgent client work and send a reply"},
+    )
+    assert workflow.status_code == 200
+    assert workflow.json()["status"] == "waiting_for_approval"
+    assert workflow.json()["plan"]["actions"]
+
+
 def test_mcp_gateway_requires_approval_for_send_email() -> None:
     response = client.post(
         "/api/mcp/tool-call",

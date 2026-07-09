@@ -30,6 +30,10 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - Optional PostgreSQL + `pgvector` storage with HNSW vector indexing
 - Document management for source inspection, metadata edits, delete, and re-index
 - Unsafe document review for prompt-injection flagged uploads
+- Policy engine with default document-access, tool-approval, and prompt-safety rules
+- Background job tracking for connector ingestion and future async workers
+- Persisted agent workflow plans for approval-backed automation
+- CI and Docker scaffolding for production-oriented validation
 - Approval workflow service for high-risk actions
 - MCP gateway service with scoped permission checks
 - Prompt guard for suspicious content detection
@@ -107,6 +111,8 @@ This starter treats security as a first-class product feature:
 4. Ask a question about the uploaded content.
 5. Review the cited passages, document library, source chunks, approvals, connector status, and audit trail.
 6. Use document actions to view chunks, edit metadata, re-index, or delete documents.
+7. Import a Google Drive-style note from the connector panel and watch the job list.
+8. Create an agent workflow and review the planned actions plus approval state.
 
 Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
 
@@ -155,10 +161,27 @@ JIRA_CLIENT_SECRET=
 
 Use `http://127.0.0.1:8000/api/connectors/{provider}/callback` as the redirect URL pattern when creating provider apps.
 
+## CI and Docker
+
+GitHub Actions run backend tests, frontend build, and frontend audit on pushes to `main` and pull requests.
+
+Docker Compose can run the full stack when Docker is available:
+
+```bash
+docker compose up --build
+```
+
+This starts:
+
+- FastAPI backend on `http://127.0.0.1:8000`
+- React preview server on `http://127.0.0.1:5173`
+- PostgreSQL with `pgvector`
+- Redis for future background workers
+
 ## Suggested next steps
 
-1. Add connector-specific ingestion jobs for Gmail, Drive, Calendar, Slack, Jira, and GitHub.
-2. Add LangGraph-based multi-step planning with approval checkpoints.
-3. Introduce integration and security tests for prompt injection, RBAC, and approval bypass attempts.
-4. Add background processing with Redis and Celery for large document ingestion.
+1. Replace synchronous job completion with Redis and Celery workers.
+2. Swap deterministic local embeddings for OpenAI or sentence-transformer embeddings.
+3. Complete Google Drive OAuth file listing and selective import.
+4. Add LangGraph state machines behind the persisted workflow records.
 5. Add production migrations with Alembic.

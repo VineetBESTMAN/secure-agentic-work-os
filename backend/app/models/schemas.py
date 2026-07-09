@@ -144,3 +144,66 @@ class OAuthStartResponse(BaseModel):
     configured: bool
     authorization_url: str | None = None
     message: str
+
+
+class PolicyRecord(BaseModel):
+    policy_id: str
+    name: str
+    description: str
+    rule_type: Literal["document_access", "tool_approval", "prompt_safety"]
+    effect: Literal["allow", "block", "approval_required"]
+    conditions: dict[str, object] = Field(default_factory=dict)
+    enabled: bool = True
+    created_at: str | None = None
+
+
+class PolicyCreateRequest(BaseModel):
+    name: str
+    description: str
+    rule_type: Literal["document_access", "tool_approval", "prompt_safety"]
+    effect: Literal["allow", "block", "approval_required"]
+    conditions: dict[str, object] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class JobRecord(BaseModel):
+    job_id: str
+    job_type: str
+    status: Literal["queued", "running", "completed", "failed"]
+    detail: dict[str, object] = Field(default_factory=dict)
+    result: dict[str, object] = Field(default_factory=dict)
+    created_by: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class ConnectorImportItem(BaseModel):
+    filename: str
+    content: str
+    mime_type: str = "text/plain"
+    classification: Literal["public", "internal", "restricted"] = "internal"
+    owner_team: str = "workspace"
+
+
+class ConnectorImportRequest(BaseModel):
+    provider: Literal["google", "github", "slack", "notion", "jira"] = "google"
+    items: list[ConnectorImportItem]
+
+
+class ConnectorImportResponse(BaseModel):
+    job: JobRecord
+    imported_documents: list[DocumentRecord]
+
+
+class AgentWorkflowRequest(BaseModel):
+    prompt: str
+
+
+class AgentWorkflowRecord(BaseModel):
+    workflow_id: str
+    prompt: str
+    requested_by: str
+    status: Literal["planned", "waiting_for_approval", "completed", "blocked"]
+    plan: AgentPlanResponse
+    created_at: str | None = None
+    updated_at: str | None = None

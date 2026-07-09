@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.core.rbac import require_scope
 from app.core.security import get_current_user
-from app.models.schemas import ConnectorRecord, OAuthStartResponse
+from app.models.schemas import ConnectorImportRequest, ConnectorImportResponse, ConnectorRecord, OAuthStartResponse
 from app.services.audit import audit_service
 from app.services.connectors import connector_service
 
@@ -32,6 +33,25 @@ def authorize_connector(provider: str, user=Depends(get_current_user)) -> OAuthS
         actor_id=user.user_id,
         event_type="connectors.authorize",
         detail={"provider": provider, "configured": response.configured},
+    )
+    return response
+
+
+@router.post("/import", response_model=ConnectorImportResponse)
+def import_connector_items(
+    payload: ConnectorImportRequest,
+    user=Depends(get_current_user),
+) -> ConnectorImportResponse:
+    require_scope(user.scopes, "documents:write")
+    response = connector_service.import_items(payload=payload, user=user)
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.import",
+        detail={
+            "provider": payload.provider,
+            "items": len(payload.items),
+            "job_id": response.job.job_id,
+        },
     )
     return response
 

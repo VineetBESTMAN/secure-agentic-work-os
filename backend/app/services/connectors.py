@@ -8,7 +8,15 @@ import httpx
 from app.core.config import get_settings
 from app.core.crypto import encrypt_secret
 from app.core.database import decode_json, encode_json, get_connection
-from app.models.schemas import ConnectorRecord, OAuthStartResponse, UserContext
+from app.models.schemas import (
+    ConnectorImportRequest,
+    ConnectorImportResponse,
+    ConnectorRecord,
+    OAuthStartResponse,
+    UserContext,
+)
+from app.services.jobs import job_service
+from app.services.rag import rag_service
 
 PROVIDERS: dict[str, dict[str, Any]] = {
     "google": {
@@ -160,6 +168,45 @@ class ConnectorService:
             )
 
         return next(record for record in self.list_connectors() if record.provider == provider)
+
+    def import_items(
+        self, payload: ConnectorImportRequest, user: UserContext
+    ) -> ConnectorImportResponse:
+        self._require_provider(payload.provider)
+        job = job_service.create(
+            job_type=f"{payload.provider}.import",
+            detail={"provider": payload.provider, "items": len(payload.items)},
+            created_by=user.user_id,
+        )
+        imported = []
+        try:
+            for item in payload.items:
+                imported.append(
+                    rag_service.ingest_file(
+                        filename=item.filename,
+                        data=item.content.encode("utf-8"),
+                        classification=item.classification,
+                        owner_team=item.owner_team,
+                        uploaded_by=user.user_id,
+                    )
+                )
+            job = job_service.update(
+                job.job_id,
+                status="completed",
+                result={
+                    "imported_documents": len(imported),
+                    "document_ids": [document.document_id for document in imported],
+                },
+            )
+        except Exception as exc:
+            job_service.update(
+                job.job_id,
+                status="failed",
+                result={"error": str(exc)},
+            )
+            raise
+
+        return ConnectorImportResponse(job=job, imported_documents=imported)
 
     def _connected_accounts_by_provider(self):
         with get_connection() as connection:

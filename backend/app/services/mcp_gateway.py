@@ -2,6 +2,7 @@ from app.core.config import get_settings
 from app.core.rbac import require_scope
 from app.models.schemas import MCPToolCallRequest, MCPToolCallResponse, UserContext
 from app.services.approval import approval_service
+from app.services.policies import policy_service
 
 
 class MCPGatewayService:
@@ -14,6 +15,9 @@ class MCPGatewayService:
         approval_required = (
             request.tool_name == "send_email" and settings.require_approval_for_send_email
         ) or (request.tool_name == "export_data" and settings.require_approval_for_export)
+        approval_required = approval_required or policy_service.tool_requires_approval(
+            request.tool_name
+        )
 
         if approval_required:
             approval = approval_service.create(

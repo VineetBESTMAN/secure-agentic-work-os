@@ -1,6 +1,30 @@
 version: "3.9"
 
 services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_SECRET_KEY: change-me
+      APP_UPLOAD_DIR: /app/data/uploads
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentic_work_os
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      - postgres
+      - redis
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -18,4 +42,5 @@ services:
       - "6379:6379"
 
 volumes:
+  backend_data:
   postgres_data:
