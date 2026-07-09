@@ -1,18 +1,28 @@
 from uuid import uuid4
 
-from app.core.database import get_connection
+from app.core.database import get_connection, is_postgres_database
 from app.models.schemas import ApprovalRecord
 
 
 class ApprovalService:
     def seed_demo_request(self) -> None:
-        with get_connection() as connection:
-            connection.execute(
-                """
+        if is_postgres_database():
+            insert_sql = """
+                INSERT INTO approval_requests
+                    (approval_id, action_id, requested_by, status)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (approval_id) DO NOTHING
+            """
+        else:
+            insert_sql = """
                 INSERT OR IGNORE INTO approval_requests
                     (approval_id, action_id, requested_by, status)
                 VALUES (?, ?, ?, ?)
-                """,
+            """
+
+        with get_connection() as connection:
+            connection.execute(
+                insert_sql,
                 ("apr_demo_1", "act_send_email", "u_employee", "pending"),
             )
 

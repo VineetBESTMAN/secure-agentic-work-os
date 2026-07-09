@@ -1,7 +1,7 @@
 import hashlib
 import secrets
 
-from app.core.database import decode_json, encode_json, get_connection
+from app.core.database import decode_json, encode_json, get_connection, is_postgres_database
 from app.models.schemas import UserContext
 
 DEMO_PASSWORD = "demo-password"
@@ -49,14 +49,24 @@ def _verify_password(password: str, stored_hash: str) -> bool:
 
 class UserService:
     def seed_demo_users(self) -> None:
+        if is_postgres_database():
+            insert_sql = """
+                INSERT INTO users
+                    (user_id, email, password_hash, role, scopes_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (user_id) DO NOTHING
+            """
+        else:
+            insert_sql = """
+                INSERT OR IGNORE INTO users
+                    (user_id, email, password_hash, role, scopes_json)
+                VALUES (?, ?, ?, ?, ?)
+            """
+
         with get_connection() as connection:
             for user in DEMO_USERS:
                 connection.execute(
-                    """
-                    INSERT OR IGNORE INTO users
-                        (user_id, email, password_hash, role, scopes_json)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
+                    insert_sql,
                     (
                         user.user_id,
                         user.email,

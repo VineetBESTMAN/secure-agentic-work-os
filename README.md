@@ -26,7 +26,8 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - JWT utilities and role-aware request handling
 - SQLite persistence for users, documents, chunks, approvals, audit logs, and connectors
 - Real upload ingestion for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
-- Local extractive RAG over uploaded document chunks with citations
+- Local embedding RAG over uploaded document chunks with citations
+- Optional PostgreSQL + `pgvector` storage with HNSW vector indexing
 - Approval workflow service for high-risk actions
 - MCP gateway service with scoped permission checks
 - Prompt guard for suspicious content detection
@@ -106,6 +107,32 @@ This starter treats security as a first-class product feature:
 
 Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
 
+## PostgreSQL and pgvector mode
+
+SQLite is still available as a zero-setup local fallback. To run the vector database path:
+
+1. Start Postgres with pgvector.
+
+```bash
+docker compose up -d postgres
+```
+
+2. Create a `.env` file in the repo root with:
+
+```text
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agentic_work_os
+APP_VECTOR_DIMENSIONS=384
+```
+
+3. Restart the backend.
+
+```bash
+cd backend
+./.venv/Scripts/python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+When `DATABASE_URL` is set to PostgreSQL, the backend creates the `vector` extension, stores chunk embeddings in a `vector(384)` column, and ranks citations with cosine distance.
+
 ## OAuth connector setup
 
 Connectors are wired for real OAuth but require provider credentials. Add the relevant values to `.env`, then restart the backend:
@@ -127,8 +154,8 @@ Use `http://127.0.0.1:8000/api/connectors/{provider}/callback` as the redirect U
 
 ## Suggested next steps
 
-1. Move SQLite to PostgreSQL plus `pgvector` for production deployment.
-2. Add connector-specific ingestion jobs for Gmail, Drive, Calendar, Slack, Jira, and GitHub.
-3. Add LangGraph-based multi-step planning with approval checkpoints.
-4. Introduce integration and security tests for prompt injection, RBAC, and approval bypass attempts.
-5. Add background processing with Redis and Celery for large document ingestion.
+1. Add connector-specific ingestion jobs for Gmail, Drive, Calendar, Slack, Jira, and GitHub.
+2. Add LangGraph-based multi-step planning with approval checkpoints.
+3. Introduce integration and security tests for prompt injection, RBAC, and approval bypass attempts.
+4. Add background processing with Redis and Celery for large document ingestion.
+5. Add production migrations with Alembic.

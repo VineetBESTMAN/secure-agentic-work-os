@@ -1,7 +1,5 @@
-import math
 import re
 import zipfile
-from collections import Counter
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
@@ -10,8 +8,15 @@ from xml.etree import ElementTree
 from pypdf import PdfReader
 
 from app.core.config import get_settings
-from app.core.database import decode_json, encode_json, get_connection
+from app.core.database import (
+    decode_json,
+    encode_json,
+    get_connection,
+    is_postgres_database,
+    vector_literal,
+)
 from app.models.schemas import Citation, DocumentRecord, RagAnswer
+from app.services.embeddings import embedding_service
 from app.services.prompt_guard import prompt_guard_service
 
 STOP_WORDS = {
@@ -117,6 +122,7 @@ def _extract_text(filename: str, data: bytes) -> str:
 
 
 def _row_to_document(row) -> DocumentRecord:
+    created_at = row["created_at"]
     return DocumentRecord(
         document_id=row["document_id"],
         title=row["title"],
@@ -127,7 +133,7 @@ def _row_to_document(row) -> DocumentRecord:
         unsafe=bool(row["unsafe"]),
         unsafe_reasons=decode_json(row["unsafe_reasons_json"], []),
         chunk_count=row["chunk_count"],
-        created_at=row["created_at"],
+        created_at=str(created_at) if created_at is not None else None,
     )
 
 
@@ -181,16 +187,7 @@ class RagService:
                     encode_json(scan.reasons),
                 ),
             )
-            connection.executemany(
-                """
-                INSERT INTO document_chunks (chunk_id, document_id, chunk_index, text)
-                VALUES (?, ?, ?, ?)
-                """,
-                [
-                    (f"chk_{uuid4().hex}", document_id, index, chunk)
-                    for index, chunk in enumerate(chunks)
-                ],
-            )
+            self._insert_chunks(connection, document_id=document_id, chunks=chunks)
 
         return self.get_document(document_id=document_id)
 
@@ -232,37 +229,11 @@ class RagService:
         return _row_to_document(row)
 
     def answer(self, question: str, role: str) -> RagAnswer:
-        query_tokens = _tokens(question)
-        if not query_tokens:
+        query_embedding = embedding_service.embed(question)
+        if not any(query_embedding):
             return RagAnswer(answer="Ask a more specific question.", citations=[])
 
-        rows = self._visible_chunks(role=role)
-        if not rows:
-            return RagAnswer(
-                answer="No accessible, safe documents have been uploaded yet.",
-                citations=[],
-            )
-
-        tokenized_chunks = [(row, Counter(_tokens(row["text"]))) for row in rows]
-        document_frequency: Counter[str] = Counter()
-        for _, counts in tokenized_chunks:
-            for token in counts:
-                document_frequency[token] += 1
-
-        total_chunks = len(tokenized_chunks)
-        scored = []
-        for row, counts in tokenized_chunks:
-            score = 0.0
-            for token in query_tokens:
-                if token not in counts:
-                    continue
-                idf = math.log((total_chunks + 1) / (document_frequency[token] + 1)) + 1
-                score += counts[token] * idf
-            if score > 0:
-                scored.append((score, row))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        top_matches = scored[:3]
+        top_matches = self._vector_matches(query_embedding=query_embedding, role=role)
         if not top_matches:
             return RagAnswer(
                 answer="I could not find a relevant passage in your accessible documents.",
@@ -270,13 +241,7 @@ class RagService:
             )
 
         citations = [
-            Citation(
-                document_id=row["document_id"],
-                title=row["title"],
-                excerpt=_summary(row["text"], limit=420),
-                chunk_id=row["chunk_id"],
-                score=round(score, 3),
-            )
+            self._match_to_citation(score=score, row=row)
             for score, row in top_matches
         ]
         source_names = ", ".join(dict.fromkeys(citation.title for citation in citations))
@@ -285,7 +250,76 @@ class RagService:
             citations=citations,
         )
 
-    def _visible_chunks(self, role: str):
+    def _insert_chunks(self, connection, document_id: str, chunks: list[str]) -> None:
+        if is_postgres_database():
+            connection.executemany(
+                """
+                INSERT INTO document_chunks (chunk_id, document_id, chunk_index, text, embedding)
+                VALUES (?, ?, ?, ?, ?::vector)
+                """,
+                [
+                    (
+                        f"chk_{uuid4().hex}",
+                        document_id,
+                        index,
+                        chunk,
+                        vector_literal(embedding_service.embed(chunk)),
+                    )
+                    for index, chunk in enumerate(chunks)
+                ],
+            )
+            return
+
+        connection.executemany(
+            """
+            INSERT INTO document_chunks (chunk_id, document_id, chunk_index, text, embedding_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"chk_{uuid4().hex}",
+                    document_id,
+                    index,
+                    chunk,
+                    encode_json(embedding_service.embed(chunk)),
+                )
+                for index, chunk in enumerate(chunks)
+            ],
+        )
+
+    def _vector_matches(self, query_embedding: list[float], role: str):
+        if is_postgres_database():
+            return self._postgres_vector_matches(query_embedding=query_embedding, role=role)
+        return self._sqlite_vector_matches(query_embedding=query_embedding, role=role)
+
+    def _postgres_vector_matches(self, query_embedding: list[float], role: str):
+        where = ["d.unsafe = FALSE", "c.embedding IS NOT NULL"]
+        params: list[str] = []
+        if role != "admin":
+            where.append("d.classification != ?")
+            params.append("restricted")
+
+        embedding = vector_literal(query_embedding)
+        with get_connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    c.chunk_id,
+                    c.text,
+                    d.document_id,
+                    d.title,
+                    1 - (c.embedding <=> ?::vector) AS score
+                FROM document_chunks c
+                JOIN documents d ON d.document_id = c.document_id
+                WHERE {' AND '.join(where)}
+                ORDER BY c.embedding <=> ?::vector
+                LIMIT 3
+                """,
+                (embedding, *params, embedding),
+            ).fetchall()
+        return [(float(row["score"]), row) for row in rows if float(row["score"]) > 0]
+
+    def _sqlite_vector_matches(self, query_embedding: list[float], role: str):
         where = ["d.unsafe = 0"]
         params: list[str] = []
         if role != "admin":
@@ -293,15 +327,36 @@ class RagService:
             params.append("restricted")
 
         with get_connection() as connection:
-            return connection.execute(
+            rows = connection.execute(
                 f"""
-                SELECT c.chunk_id, c.text, d.document_id, d.title
+                SELECT c.chunk_id, c.text, c.embedding_json, d.document_id, d.title
                 FROM document_chunks c
                 JOIN documents d ON d.document_id = c.document_id
                 WHERE {' AND '.join(where)}
                 """,
                 tuple(params),
             ).fetchall()
+
+        scored = []
+        for row in rows:
+            embedding = decode_json(row["embedding_json"], None)
+            if not embedding:
+                embedding = embedding_service.embed(row["text"])
+            score = embedding_service.cosine_similarity(query_embedding, embedding)
+            if score > 0:
+                scored.append((score, row))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[:3]
+
+    def _match_to_citation(self, score: float, row) -> Citation:
+        return Citation(
+            document_id=row["document_id"],
+            title=row["title"],
+            excerpt=_summary(row["text"], limit=420),
+            chunk_id=row["chunk_id"],
+            score=round(score, 3),
+        )
 
 
 rag_service = RagService()

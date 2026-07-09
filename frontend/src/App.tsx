@@ -370,6 +370,7 @@ export default function App() {
                 <article key={citation.chunk_id || citation.document_id} className="item">
                   <strong>{citation.title}</strong>
                   <span>{citation.excerpt}</span>
+                  {citation.score !== null && <small>Similarity score: {citation.score}</small>}
                 </article>
               ))}
             </div>
