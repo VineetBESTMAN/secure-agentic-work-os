@@ -36,6 +36,27 @@ class DocumentRecord(BaseModel):
     created_at: str | None = None
 
 
+class DocumentChunkRecord(BaseModel):
+    chunk_id: str
+    chunk_index: int
+    text: str
+
+
+class DocumentDetail(DocumentRecord):
+    chunks: list[DocumentChunkRecord] = Field(default_factory=list)
+
+
+class DocumentUpdateRequest(BaseModel):
+    title: str | None = None
+    classification: Literal["public", "internal", "restricted"] | None = None
+    owner_team: str | None = None
+
+
+class ReindexResponse(BaseModel):
+    document: DocumentRecord
+    message: str
+
+
 class Citation(BaseModel):
     document_id: str
     title: str

@@ -28,6 +28,8 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - Real upload ingestion for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
 - Local embedding RAG over uploaded document chunks with citations
 - Optional PostgreSQL + `pgvector` storage with HNSW vector indexing
+- Document management for source inspection, metadata edits, delete, and re-index
+- Unsafe document review for prompt-injection flagged uploads
 - Approval workflow service for high-risk actions
 - MCP gateway service with scoped permission checks
 - Prompt guard for suspicious content detection
@@ -103,7 +105,8 @@ This starter treats security as a first-class product feature:
 2. Sign in with `admin@demo.local` and `demo-password`.
 3. Upload a `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, or `.docx` file.
 4. Ask a question about the uploaded content.
-5. Review the cited passages, document library, approvals, connector status, and audit trail.
+5. Review the cited passages, document library, source chunks, approvals, connector status, and audit trail.
+6. Use document actions to view chunks, edit metadata, re-index, or delete documents.
 
 Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
 

@@ -171,6 +171,10 @@ h2 {
   grid-template-columns: 1fr 1fr;
 }
 
+.split.three {
+  grid-template-columns: 1.4fr 1fr 1fr;
+}
+
 .item-list,
 .citation-list {
   display: grid;
@@ -211,6 +215,10 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.source-list {
+  max-height: 460px;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -223,7 +231,8 @@ h2 {
 
   .panel-grid,
   .columns,
-  .split {
+  .split,
+  .split.three {
     grid-template-columns: 1fr;
   }
 

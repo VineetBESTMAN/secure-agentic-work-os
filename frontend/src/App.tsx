@@ -2,11 +2,15 @@ import { FormEvent, useEffect, useState } from "react";
 import {
   CheckCircle2,
   Database,
+  Eye,
   FileUp,
   Plug,
   RefreshCw,
+  RotateCcw,
+  Save,
   Search,
   ShieldCheck,
+  Trash2,
   XCircle,
 } from "lucide-react";
 
@@ -28,6 +32,14 @@ type DocumentRecord = {
   unsafe_reasons: string[];
   chunk_count: number;
   created_at: string | null;
+};
+
+type DocumentDetail = DocumentRecord & {
+  chunks: {
+    chunk_id: string;
+    chunk_index: number;
+    text: string;
+  }[];
 };
 
 type RagAnswer = {
@@ -78,6 +90,8 @@ export default function App() {
     return stored ? JSON.parse(stored) : null;
   });
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [unsafeDocuments, setUnsafeDocuments] = useState<DocumentRecord[]>([]);
+  const [selectedDocument, setSelectedDocument] = useState<DocumentDetail | null>(null);
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorRecord[]>([]);
@@ -86,6 +100,9 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [classification, setClassification] = useState("internal");
   const [ownerTeam, setOwnerTeam] = useState("general");
+  const [editTitle, setEditTitle] = useState("");
+  const [editClassification, setEditClassification] = useState("internal");
+  const [editOwnerTeam, setEditOwnerTeam] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -102,6 +119,9 @@ export default function App() {
       const body = await response.json().catch(() => ({ detail: response.statusText }));
       throw new Error(body.detail || response.statusText);
     }
+    if (response.status === 204) {
+      return undefined as T;
+    }
     return response.json();
   }
 
@@ -117,6 +137,9 @@ export default function App() {
     setConnectors(connectorData);
     if (user?.scopes.includes("audit:read")) {
       setAuditEvents(await api<AuditEvent[]>("/api/audit/events"));
+    }
+    if (user?.role === "admin" || user?.role === "manager") {
+      setUnsafeDocuments(await api<DocumentRecord[]>("/api/documents/unsafe"));
     }
   }
 
@@ -188,6 +211,77 @@ export default function App() {
       await refreshAll();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Query failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function viewDocument(documentId: string) {
+    setBusy(true);
+    try {
+      const detail = await api<DocumentDetail>(`/api/documents/${documentId}`);
+      setSelectedDocument(detail);
+      setEditTitle(detail.title);
+      setEditClassification(detail.classification);
+      setEditOwnerTeam(detail.owner_team);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not load document");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateDocument(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedDocument) return;
+    setBusy(true);
+    try {
+      const updated = await api<DocumentRecord>(`/api/documents/${selectedDocument.document_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: editTitle,
+          classification: editClassification,
+          owner_team: editOwnerTeam,
+        }),
+      });
+      setMessage(`Updated ${updated.title}`);
+      await refreshAll();
+      await viewDocument(updated.document_id);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reindexDocument(documentId: string) {
+    setBusy(true);
+    try {
+      const result = await api<{ document: DocumentRecord; message: string }>(
+        `/api/documents/${documentId}/reindex`,
+        { method: "POST" },
+      );
+      setMessage(result.message);
+      await refreshAll();
+      await viewDocument(documentId);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Reindex failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteDocument(documentId: string) {
+    const confirmed = window.confirm("Delete this document and its chunks?");
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await api<void>(`/api/documents/${documentId}`, { method: "DELETE" });
+      setSelectedDocument(null);
+      setMessage("Document deleted.");
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Delete failed");
     } finally {
       setBusy(false);
     }
@@ -392,6 +486,20 @@ export default function App() {
                     {document.classification} | {document.owner_team} | {document.chunk_count} chunks
                   </small>
                   {document.unsafe && <em>Flagged: {document.unsafe_reasons.join(", ")}</em>}
+                  <div className="button-row">
+                    <button type="button" onClick={() => viewDocument(document.document_id)}>
+                      <Eye size={16} />
+                      View
+                    </button>
+                    <button type="button" onClick={() => reindexDocument(document.document_id)}>
+                      <RotateCcw size={16} />
+                      Reindex
+                    </button>
+                    <button type="button" onClick={() => deleteDocument(document.document_id)}>
+                      <Trash2 size={16} />
+                      Delete
+                    </button>
+                  </div>
                 </article>
               ))}
               {documents.length === 0 && <p className="empty">No documents uploaded yet.</p>}
@@ -429,6 +537,56 @@ export default function App() {
             </div>
           </section>
         </section>
+
+        {selectedDocument && (
+          <section className="panel">
+            <div className="panel-title">
+              <Eye size={18} />
+              <h2>Source Viewer</h2>
+            </div>
+            <form className="stack" onSubmit={updateDocument}>
+              <div className="split three">
+                <label>
+                  Title
+                  <input
+                    value={editTitle}
+                    onChange={(event) => setEditTitle(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Classification
+                  <select
+                    value={editClassification}
+                    onChange={(event) => setEditClassification(event.target.value)}
+                  >
+                    <option value="public">Public</option>
+                    <option value="internal">Internal</option>
+                    <option value="restricted">Restricted</option>
+                  </select>
+                </label>
+                <label>
+                  Team
+                  <input
+                    value={editOwnerTeam}
+                    onChange={(event) => setEditOwnerTeam(event.target.value)}
+                  />
+                </label>
+              </div>
+              <button type="submit" disabled={busy}>
+                <Save size={16} />
+                Save metadata
+              </button>
+            </form>
+            <div className="item-list source-list">
+              {selectedDocument.chunks.map((chunk) => (
+                <article key={chunk.chunk_id} className="item">
+                  <strong>Chunk {chunk.chunk_index + 1}</strong>
+                  <span>{chunk.text}</span>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="columns">
           <section className="panel">
@@ -470,6 +628,33 @@ export default function App() {
             </div>
           </section>
         </section>
+
+        {unsafeDocuments.length > 0 && (
+          <section className="panel">
+            <div className="panel-title">
+              <ShieldCheck size={18} />
+              <h2>Unsafe Document Review</h2>
+            </div>
+            <div className="item-list">
+              {unsafeDocuments.map((document) => (
+                <article key={document.document_id} className="item">
+                  <strong>{document.title}</strong>
+                  <span>{document.unsafe_reasons.join(", ")}</span>
+                  <div className="button-row">
+                    <button type="button" onClick={() => viewDocument(document.document_id)}>
+                      <Eye size={16} />
+                      Inspect
+                    </button>
+                    <button type="button" onClick={() => deleteDocument(document.document_id)}>
+                      <Trash2 size={16} />
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
       </section>
     </main>
   );

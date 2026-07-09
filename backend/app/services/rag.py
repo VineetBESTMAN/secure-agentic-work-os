@@ -15,7 +15,14 @@ from app.core.database import (
     is_postgres_database,
     vector_literal,
 )
-from app.models.schemas import Citation, DocumentRecord, RagAnswer
+from app.models.schemas import (
+    Citation,
+    DocumentChunkRecord,
+    DocumentDetail,
+    DocumentRecord,
+    DocumentUpdateRequest,
+    RagAnswer,
+)
 from app.services.embeddings import embedding_service
 from app.services.prompt_guard import prompt_guard_service
 
@@ -183,7 +190,7 @@ class RagService:
                     owner_team,
                     _summary(cleaned),
                     uploaded_by,
-                    int(scan.flagged),
+                    scan.flagged,
                     encode_json(scan.reasons),
                 ),
             )
@@ -227,6 +234,131 @@ class RagService:
         if row is None:
             raise ValueError("Document was not found after ingestion.")
         return _row_to_document(row)
+
+    def get_document_detail(self, document_id: str, role: str) -> DocumentDetail:
+        document = self.get_document(document_id=document_id)
+        if not self.can_access_document(document=document, role=role):
+            raise PermissionError("You do not have access to this document.")
+
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT chunk_id, chunk_index, text
+                FROM document_chunks
+                WHERE document_id = ?
+                ORDER BY chunk_index ASC
+                """,
+                (document_id,),
+            ).fetchall()
+
+        return DocumentDetail(
+            **document.model_dump(),
+            chunks=[
+                DocumentChunkRecord(
+                    chunk_id=row["chunk_id"],
+                    chunk_index=row["chunk_index"],
+                    text=row["text"],
+                )
+                for row in rows
+            ],
+        )
+
+    def list_unsafe_documents(self) -> list[DocumentRecord]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT d.*, COUNT(c.chunk_id) AS chunk_count
+                FROM documents d
+                LEFT JOIN document_chunks c ON c.document_id = d.document_id
+                WHERE d.unsafe = ?
+                GROUP BY d.document_id
+                ORDER BY d.created_at DESC
+                """,
+                (True,),
+            ).fetchall()
+        return [_row_to_document(row) for row in rows]
+
+    def update_document(
+        self,
+        document_id: str,
+        payload: DocumentUpdateRequest,
+        role: str,
+    ) -> DocumentRecord:
+        document = self.get_document(document_id=document_id)
+        if not self.can_access_document(document=document, role=role):
+            raise PermissionError("You do not have access to this document.")
+
+        updates: list[str] = []
+        params: list[str] = []
+        if payload.title is not None:
+            updates.append("title = ?")
+            params.append(payload.title.strip() or document.title)
+        if payload.classification is not None:
+            updates.append("classification = ?")
+            params.append(payload.classification)
+        if payload.owner_team is not None:
+            updates.append("owner_team = ?")
+            params.append(payload.owner_team.strip() or document.owner_team)
+
+        if updates:
+            params.append(document_id)
+            with get_connection() as connection:
+                connection.execute(
+                    f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ?",
+                    tuple(params),
+                )
+        return self.get_document(document_id=document_id)
+
+    def delete_document(self, document_id: str, role: str) -> None:
+        document = self.get_document(document_id=document_id)
+        if not self.can_access_document(document=document, role=role):
+            raise PermissionError("You do not have access to this document.")
+
+        with get_connection() as connection:
+            connection.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
+
+        file_path = self._stored_file_path(document_id=document_id, filename=document.filename)
+        if file_path.exists():
+            file_path.unlink()
+
+    def reindex_document(self, document_id: str, role: str) -> DocumentRecord:
+        document = self.get_document(document_id=document_id)
+        if not self.can_access_document(document=document, role=role):
+            raise PermissionError("You do not have access to this document.")
+
+        file_path = self._stored_file_path(document_id=document_id, filename=document.filename)
+        if not file_path.exists():
+            raise ValueError("The original uploaded file is missing from local storage.")
+
+        cleaned = _clean_text(_extract_text(filename=document.filename, data=file_path.read_bytes()))
+        if not cleaned:
+            raise ValueError("No readable text was found in this file.")
+
+        chunks = _chunk_text(cleaned)
+        if not chunks:
+            raise ValueError("No searchable chunks could be created from this file.")
+
+        scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        with get_connection() as connection:
+            connection.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+            connection.execute(
+                """
+                UPDATE documents
+                SET summary = ?, unsafe = ?, unsafe_reasons_json = ?
+                WHERE document_id = ?
+                """,
+                (
+                    _summary(cleaned),
+                    scan.flagged,
+                    encode_json(scan.reasons),
+                    document_id,
+                ),
+            )
+            self._insert_chunks(connection, document_id=document_id, chunks=chunks)
+        return self.get_document(document_id=document_id)
+
+    def can_access_document(self, document: DocumentRecord, role: str) -> bool:
+        return role == "admin" or document.classification != "restricted"
 
     def answer(self, question: str, role: str) -> RagAnswer:
         query_embedding = embedding_service.embed(question)
@@ -357,6 +489,9 @@ class RagService:
             chunk_id=row["chunk_id"],
             score=round(score, 3),
         )
+
+    def _stored_file_path(self, document_id: str, filename: str) -> Path:
+        return Path(get_settings().upload_dir) / f"{document_id}_{Path(filename).name}"
 
 
 rag_service = RagService()
