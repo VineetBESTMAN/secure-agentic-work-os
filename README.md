@@ -178,6 +178,18 @@ This starts:
 - PostgreSQL with `pgvector`
 - Redis for future background workers
 
+For a repeatable verification run, install and start Docker Desktop, then run one of these commands from the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify_docker_stack.ps1
+```
+
+```bash
+bash scripts/verify_docker_stack.sh
+```
+
+The verification scripts build the stack, wait for backend readiness, sign in with the demo admin user, import a sample connector note into PostgreSQL/pgvector-backed RAG storage, query it for a cited answer, and confirm the frontend is reachable.
+
 ## Suggested next steps
 
 1. Replace synchronous job completion with Redis and Celery workers.

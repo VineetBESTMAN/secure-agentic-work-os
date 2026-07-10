@@ -1,12 +1,16 @@
 FROM python:3.10-slim
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
 
 RUN python -m pip install --upgrade pip && \
-    python -m pip install .
+    python -m pip install . && \
+    mkdir -p /app/data/uploads
 
 EXPOSE 8000
 
