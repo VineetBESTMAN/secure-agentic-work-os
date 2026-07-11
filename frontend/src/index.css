@@ -209,6 +209,22 @@ h2 {
   gap: 8px;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.checkbox-row input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.drive-file a {
+  color: #2f6f73;
+  font-size: 0.84rem;
+}
+
 .compact .item span {
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 0.8rem;

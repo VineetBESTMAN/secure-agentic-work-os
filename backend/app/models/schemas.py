@@ -195,6 +195,27 @@ class ConnectorImportResponse(BaseModel):
     imported_documents: list[DocumentRecord]
 
 
+class GoogleDriveFileRecord(BaseModel):
+    file_id: str
+    name: str
+    mime_type: str
+    modified_time: str | None = None
+    size: int | None = None
+    web_view_link: str | None = None
+    importable: bool = True
+
+
+class GoogleDriveFileListResponse(BaseModel):
+    files: list[GoogleDriveFileRecord]
+    next_page_token: str | None = None
+
+
+class GoogleDriveImportRequest(BaseModel):
+    file_ids: list[str] = Field(min_length=1, max_length=10)
+    classification: Literal["public", "internal", "restricted"] = "internal"
+    owner_team: str = "workspace"
+
+
 class AgentWorkflowRequest(BaseModel):
     prompt: str
 

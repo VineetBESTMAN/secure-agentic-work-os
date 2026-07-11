@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -6,12 +7,15 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import get_settings
-from app.core.crypto import encrypt_secret
+from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.database import decode_json, encode_json, get_connection
 from app.models.schemas import (
     ConnectorImportRequest,
     ConnectorImportResponse,
     ConnectorRecord,
+    GoogleDriveFileListResponse,
+    GoogleDriveFileRecord,
+    GoogleDriveImportRequest,
     OAuthStartResponse,
     UserContext,
 )
@@ -56,6 +60,27 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "token_url": "https://auth.atlassian.com/oauth/token",
         "scopes": ["read:jira-work", "read:jira-user", "offline_access"],
     },
+}
+
+DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
+DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+DRIVE_MAX_IMPORT_BYTES = 10 * 1024 * 1024
+SUPPORTED_RAG_SUFFIXES = {".txt", ".md", ".csv", ".json", ".log", ".eml", ".pdf", ".docx"}
+
+GOOGLE_WORKSPACE_EXPORTS = {
+    "application/vnd.google-apps.document": ("text/plain", ".txt"),
+    "application/vnd.google-apps.spreadsheet": ("text/csv", ".csv"),
+    "application/vnd.google-apps.presentation": ("text/plain", ".txt"),
+}
+
+DRIVE_MIME_EXTENSIONS = {
+    "application/json": ".json",
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "message/rfc822": ".eml",
+    "text/csv": ".csv",
+    "text/markdown": ".md",
+    "text/plain": ".txt",
 }
 
 
@@ -130,7 +155,7 @@ class ConnectorService:
 
     async def complete_callback(self, provider: str, code: str, state: str) -> ConnectorRecord:
         self._require_provider(provider)
-        self._consume_state(provider=provider, state=state)
+        requested_by = self._consume_state(provider=provider, state=state)
 
         token_payload = await self._exchange_code(provider=provider, code=code)
         access_token = token_payload.get("access_token")
@@ -161,7 +186,7 @@ class ConnectorService:
                     encrypt_secret(str(access_token)),
                     encrypt_secret(token_payload.get("refresh_token")),
                     self._expires_at(token_payload),
-                    "oauth_callback",
+                    requested_by,
                     now,
                     now,
                 ),
@@ -208,6 +233,89 @@ class ConnectorService:
 
         return ConnectorImportResponse(job=job, imported_documents=imported)
 
+    async def list_google_drive_files(
+        self,
+        search: str | None,
+        page_size: int,
+        page_token: str | None,
+    ) -> GoogleDriveFileListResponse:
+        token = await self._access_token(provider="google")
+        params: dict[str, str | int | bool] = {
+            "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)",
+            "includeItemsFromAllDrives": True,
+            "orderBy": "modifiedTime desc,name",
+            "pageSize": max(1, min(page_size, 100)),
+            "q": self._drive_query(search),
+            "spaces": "drive",
+            "supportsAllDrives": True,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"{DRIVE_API_BASE}/files",
+                headers=self._bearer_headers(token),
+                params=params,
+            )
+        response.raise_for_status()
+        body = response.json()
+        return GoogleDriveFileListResponse(
+            files=[
+                self._drive_file_record(file_data)
+                for file_data in body.get("files", [])
+                if file_data.get("mimeType") != DRIVE_FOLDER_MIME_TYPE
+            ],
+            next_page_token=body.get("nextPageToken"),
+        )
+
+    async def import_google_drive_files(
+        self,
+        payload: GoogleDriveImportRequest,
+        user: UserContext,
+    ) -> ConnectorImportResponse:
+        token = await self._access_token(provider="google")
+        job = job_service.create(
+            job_type="google.drive_import",
+            detail={"provider": "google", "file_ids": payload.file_ids},
+            created_by=user.user_id,
+        )
+        imported = []
+        try:
+            for file_id in payload.file_ids:
+                metadata = await self._google_drive_file_metadata(token=token, file_id=file_id)
+                filename, data = await self._google_drive_file_content(
+                    token=token,
+                    metadata=metadata,
+                )
+                imported.append(
+                    rag_service.ingest_file(
+                        filename=filename,
+                        data=data,
+                        classification=payload.classification,
+                        owner_team=payload.owner_team,
+                        uploaded_by=user.user_id,
+                    )
+                )
+            job = job_service.update(
+                job.job_id,
+                status="completed",
+                result={
+                    "imported_documents": len(imported),
+                    "document_ids": [document.document_id for document in imported],
+                    "source_file_ids": payload.file_ids,
+                },
+            )
+        except Exception as exc:
+            job_service.update(
+                job.job_id,
+                status="failed",
+                result={"error": str(exc)},
+            )
+            raise
+
+        return ConnectorImportResponse(job=job, imported_documents=imported)
+
     def _connected_accounts_by_provider(self):
         with get_connection() as connection:
             rows = connection.execute(
@@ -239,7 +347,7 @@ class ConnectorService:
         if provider not in PROVIDERS:
             raise ValueError("Unsupported connector provider.")
 
-    def _consume_state(self, provider: str, state: str) -> None:
+    def _consume_state(self, provider: str, state: str) -> str:
         with get_connection() as connection:
             row = connection.execute(
                 "SELECT * FROM oauth_states WHERE state = ? AND provider = ?",
@@ -248,6 +356,7 @@ class ConnectorService:
             if row is None:
                 raise ValueError("OAuth state is invalid or expired.")
             connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+        return row["requested_by"]
 
     async def _exchange_code(self, provider: str, code: str) -> dict[str, Any]:
         definition = PROVIDERS[provider]
@@ -288,6 +397,191 @@ class ConnectorService:
             datetime.now(timezone.utc).timestamp() + expires_in,
             tz=timezone.utc,
         ).isoformat()
+
+    async def _access_token(self, provider: str) -> str:
+        account = self._connected_account(provider=provider)
+        token = decrypt_secret(account["token_cipher"])
+        if not token:
+            raise ValueError(f"{PROVIDERS[provider]['display_name']} is not connected.")
+
+        if provider == "google" and self._token_expires_soon(account["expires_at"]):
+            refresh_token = decrypt_secret(account["refresh_token_cipher"])
+            if refresh_token:
+                token = await self._refresh_access_token(
+                    provider=provider,
+                    connector_id=account["connector_id"],
+                    refresh_token=refresh_token,
+                )
+        return token
+
+    def _connected_account(self, provider: str):
+        self._require_provider(provider)
+        with get_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM connector_accounts
+                WHERE provider = ? AND status = 'connected'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (provider,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"{PROVIDERS[provider]['display_name']} is not connected.")
+        return row
+
+    async def _refresh_access_token(
+        self,
+        provider: str,
+        connector_id: str,
+        refresh_token: str,
+    ) -> str:
+        if not self._client_id(provider) or not self._client_secret(provider):
+            raise ValueError(
+                f"{PROVIDERS[provider]['display_name']} needs OAuth credentials to refresh access."
+            )
+
+        data = {
+            "client_id": self._client_id(provider),
+            "client_secret": self._client_secret(provider),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(PROVIDERS[provider]["token_url"], data=data)
+        response.raise_for_status()
+        token_payload = response.json()
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            raise ValueError("OAuth provider did not return a refreshed access token.")
+
+        scopes = token_payload.get("scope")
+        now = datetime.now(timezone.utc).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE connector_accounts
+                SET token_cipher = ?,
+                    refresh_token_cipher = ?,
+                    scopes_json = COALESCE(?, scopes_json),
+                    expires_at = ?,
+                    updated_at = ?
+                WHERE connector_id = ?
+                """,
+                (
+                    encrypt_secret(str(access_token)),
+                    encrypt_secret(token_payload.get("refresh_token") or refresh_token),
+                    encode_json(scopes.split()) if isinstance(scopes, str) else None,
+                    self._expires_at(token_payload),
+                    now,
+                    connector_id,
+                ),
+            )
+        return str(access_token)
+
+    def _token_expires_soon(self, expires_at: Any) -> bool:
+        if not expires_at:
+            return False
+        if isinstance(expires_at, datetime):
+            expiry = expires_at
+        else:
+            try:
+                expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            except ValueError:
+                return True
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry <= datetime.now(timezone.utc) + timedelta(minutes=2)
+
+    def _bearer_headers(self, token: str) -> dict[str, str]:
+        return {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+
+    def _drive_query(self, search: str | None) -> str:
+        base = f"trashed = false and mimeType != '{DRIVE_FOLDER_MIME_TYPE}'"
+        if not search or not search.strip():
+            return base
+        escaped = search.strip().replace("\\", "\\\\").replace("'", "\\'")
+        return f"{base} and (name contains '{escaped}' or fullText contains '{escaped}')"
+
+    def _drive_file_record(self, file_data: dict[str, Any]) -> GoogleDriveFileRecord:
+        size = file_data.get("size")
+        return GoogleDriveFileRecord(
+            file_id=file_data["id"],
+            name=file_data.get("name") or "Untitled Drive file",
+            mime_type=file_data.get("mimeType") or "application/octet-stream",
+            modified_time=file_data.get("modifiedTime"),
+            size=int(size) if isinstance(size, str) and size.isdigit() else None,
+            web_view_link=file_data.get("webViewLink"),
+            importable=self._is_drive_file_importable(file_data),
+        )
+
+    async def _google_drive_file_metadata(self, token: str, file_id: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"{DRIVE_API_BASE}/files/{file_id}",
+                headers=self._bearer_headers(token),
+                params={
+                    "fields": "id,name,mimeType,modifiedTime,size,webViewLink",
+                    "supportsAllDrives": True,
+                },
+            )
+        response.raise_for_status()
+        metadata = response.json()
+        if not self._is_drive_file_importable(metadata):
+            raise ValueError(f"{metadata.get('name', file_id)} is not a supported RAG file type.")
+        size = metadata.get("size")
+        if isinstance(size, str) and size.isdigit() and int(size) > DRIVE_MAX_IMPORT_BYTES:
+            raise ValueError("Drive file is larger than the 10 MB import limit.")
+        return metadata
+
+    async def _google_drive_file_content(
+        self,
+        token: str,
+        metadata: dict[str, Any],
+    ) -> tuple[str, bytes]:
+        mime_type = metadata.get("mimeType") or "application/octet-stream"
+        filename = self._drive_import_filename(metadata)
+        headers = self._bearer_headers(token)
+
+        if mime_type in GOOGLE_WORKSPACE_EXPORTS:
+            export_mime_type, _ = GOOGLE_WORKSPACE_EXPORTS[mime_type]
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{DRIVE_API_BASE}/files/{metadata['id']}/export",
+                    headers=headers,
+                    params={"mimeType": export_mime_type},
+                )
+        else:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{DRIVE_API_BASE}/files/{metadata['id']}",
+                    headers=headers,
+                    params={"alt": "media", "supportsAllDrives": True},
+                )
+
+        response.raise_for_status()
+        if len(response.content) > DRIVE_MAX_IMPORT_BYTES:
+            raise ValueError("Drive file is larger than the 10 MB import limit.")
+        return filename, response.content
+
+    def _drive_import_filename(self, metadata: dict[str, Any]) -> str:
+        name = metadata.get("name") or metadata.get("id") or "google-drive-file"
+        mime_type = metadata.get("mimeType") or "application/octet-stream"
+        suffix = Path(name).suffix.lower()
+        if suffix in SUPPORTED_RAG_SUFFIXES:
+            return name
+        if mime_type in GOOGLE_WORKSPACE_EXPORTS:
+            return f"{name}{GOOGLE_WORKSPACE_EXPORTS[mime_type][1]}"
+        if mime_type in DRIVE_MIME_EXTENSIONS:
+            return f"{name}{DRIVE_MIME_EXTENSIONS[mime_type]}"
+        return name
+
+    def _is_drive_file_importable(self, metadata: dict[str, Any]) -> bool:
+        mime_type = metadata.get("mimeType") or ""
+        if mime_type in GOOGLE_WORKSPACE_EXPORTS:
+            return True
+        return Path(self._drive_import_filename(metadata)).suffix.lower() in SUPPORTED_RAG_SUFFIXES
 
 
 connector_service = ConnectorService()

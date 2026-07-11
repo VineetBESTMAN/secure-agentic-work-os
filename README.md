@@ -161,6 +161,23 @@ JIRA_CLIENT_SECRET=
 
 Use `http://127.0.0.1:8000/api/connectors/{provider}/callback` as the redirect URL pattern when creating provider apps.
 
+### Google Drive connector
+
+The Google connector can browse recent Drive files and import selected files into the RAG library after OAuth is connected.
+
+1. Create a Google Cloud OAuth app and enable the Google Drive API.
+2. Add this redirect URI to the OAuth client:
+
+```text
+http://127.0.0.1:8000/api/connectors/google/callback
+```
+
+3. Add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to `.env`.
+4. Restart the backend or Docker stack.
+5. Open the app, sign in, authorize Google Workspace, search Drive files, select importable files, and click **Import selected**.
+
+The backend uses Google Drive `files.list` for browsing, `files.get?alt=media` for stored files, and `files.export` for Google Docs, Sheets, and Slides.
+
 ## CI and Docker
 
 GitHub Actions run backend tests, frontend build, and frontend audit on pushes to `main` and pull requests.

@@ -2,7 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.rbac import require_scope
 from app.core.security import get_current_user
-from app.models.schemas import ConnectorImportRequest, ConnectorImportResponse, ConnectorRecord, OAuthStartResponse
+from app.models.schemas import (
+    ConnectorImportRequest,
+    ConnectorImportResponse,
+    ConnectorRecord,
+    GoogleDriveFileListResponse,
+    GoogleDriveImportRequest,
+    OAuthStartResponse,
+)
 from app.services.audit import audit_service
 from app.services.connectors import connector_service
 
@@ -51,6 +58,60 @@ def import_connector_items(
             "provider": payload.provider,
             "items": len(payload.items),
             "job_id": response.job.job_id,
+        },
+    )
+    return response
+
+
+@router.get("/google/drive/files", response_model=GoogleDriveFileListResponse)
+async def list_google_drive_files(
+    search: str | None = Query(default=None),
+    page_size: int = Query(default=20, ge=1, le=100),
+    page_token: str | None = Query(default=None),
+    user=Depends(get_current_user),
+) -> GoogleDriveFileListResponse:
+    require_scope(user.scopes, "documents:read")
+    try:
+        response = await connector_service.list_google_drive_files(
+            search=search,
+            page_size=page_size,
+            page_token=page_token,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.google_drive_list",
+        detail={"files": len(response.files), "search": search or ""},
+    )
+    return response
+
+
+@router.post("/google/drive/import", response_model=ConnectorImportResponse)
+async def import_google_drive_files(
+    payload: GoogleDriveImportRequest,
+    user=Depends(get_current_user),
+) -> ConnectorImportResponse:
+    require_scope(user.scopes, "documents:write")
+    try:
+        response = await connector_service.import_google_drive_files(payload=payload, user=user)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.google_drive_import",
+        detail={
+            "files": len(payload.file_ids),
+            "job_id": response.job.job_id,
+            "documents": len(response.imported_documents),
         },
     )
     return response

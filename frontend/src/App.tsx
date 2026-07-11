@@ -81,6 +81,16 @@ type ConnectorRecord = {
   scopes: string[];
 };
 
+type GoogleDriveFileRecord = {
+  file_id: string;
+  name: string;
+  mime_type: string;
+  modified_time: string | null;
+  size: number | null;
+  web_view_link: string | null;
+  importable: boolean;
+};
+
 type PolicyRecord = {
   policy_id: string;
   name: string;
@@ -131,6 +141,10 @@ export default function App() {
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorRecord[]>([]);
+  const [driveFiles, setDriveFiles] = useState<GoogleDriveFileRecord[]>([]);
+  const [driveNextPageToken, setDriveNextPageToken] = useState<string | null>(null);
+  const [driveSearch, setDriveSearch] = useState("");
+  const [selectedDriveFileIds, setSelectedDriveFileIds] = useState<string[]>([]);
   const [policies, setPolicies] = useState<PolicyRecord[]>([]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [workflows, setWorkflows] = useState<AgentWorkflowRecord[]>([]);
@@ -417,6 +431,73 @@ export default function App() {
     }
   }
 
+  async function loadGoogleDriveFiles(pageToken: string | null = null) {
+    setBusy(true);
+    try {
+      const params = new URLSearchParams({ page_size: "10" });
+      if (driveSearch.trim()) {
+        params.set("search", driveSearch.trim());
+      }
+      if (pageToken) {
+        params.set("page_token", pageToken);
+      }
+      const result = await api<{
+        files: GoogleDriveFileRecord[];
+        next_page_token: string | null;
+      }>(`/api/connectors/google/drive/files?${params.toString()}`);
+
+      setDriveFiles((current) => (pageToken ? [...current, ...result.files] : result.files));
+      setDriveNextPageToken(result.next_page_token);
+      if (!pageToken) {
+        setSelectedDriveFileIds([]);
+      }
+      setMessage(`Loaded ${result.files.length} Google Drive files.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Drive file load failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleDriveFile(fileId: string) {
+    setSelectedDriveFileIds((current) =>
+      current.includes(fileId)
+        ? current.filter((selectedId) => selectedId !== fileId)
+        : [...current, fileId],
+    );
+  }
+
+  async function importSelectedGoogleDriveFiles() {
+    if (selectedDriveFileIds.length === 0) {
+      setMessage("Select at least one Google Drive file first.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const result = await api<{
+        job: JobRecord;
+        imported_documents: DocumentRecord[];
+      }>("/api/connectors/google/drive/import", {
+        method: "POST",
+        body: JSON.stringify({
+          file_ids: selectedDriveFileIds,
+          classification: "internal",
+          owner_team: "workspace",
+        }),
+      });
+      setMessage(
+        `Imported ${result.imported_documents.length} real Google Drive files through ${result.job.job_id}.`,
+      );
+      setSelectedDriveFileIds([]);
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Drive import failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function createAgentWorkflow(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -440,6 +521,9 @@ export default function App() {
     localStorage.removeItem("workos_token");
     localStorage.removeItem("workos_user");
   }
+
+  const googleConnector = connectors.find((connector) => connector.provider === "google");
+  const googleDriveReady = googleConnector?.status === "connected";
 
   return (
     <main className="app-shell">
@@ -705,7 +789,72 @@ export default function App() {
               ))}
             </div>
             <label>
-              Google Drive import text
+              Search Google Drive
+              <input
+                value={driveSearch}
+                onChange={(event) => setDriveSearch(event.target.value)}
+                placeholder="contracts, renewal, policy..."
+              />
+            </label>
+            <div className="button-row">
+              <button
+                type="button"
+                onClick={() => loadGoogleDriveFiles()}
+                disabled={!token || busy || !googleDriveReady}
+              >
+                <Search size={16} />
+                Load Drive files
+              </button>
+              <button
+                type="button"
+                onClick={importSelectedGoogleDriveFiles}
+                disabled={!token || busy || selectedDriveFileIds.length === 0}
+              >
+                <Plug size={16} />
+                Import selected
+              </button>
+            </div>
+            {!googleDriveReady && (
+              <small>Authorize Google Workspace before listing real Drive files.</small>
+            )}
+            <div className="item-list compact">
+              {driveFiles.map((file) => (
+                <article key={file.file_id} className="item drive-file">
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={selectedDriveFileIds.includes(file.file_id)}
+                      disabled={!file.importable}
+                      onChange={() => toggleDriveFile(file.file_id)}
+                    />
+                    <span>
+                      <strong>{file.name}</strong>
+                      {!file.importable && <em> Unsupported file type</em>}
+                    </span>
+                  </label>
+                  <small>{file.mime_type}</small>
+                  {file.modified_time && <small>Modified {file.modified_time}</small>}
+                  {file.web_view_link && (
+                    <a href={file.web_view_link} target="_blank" rel="noreferrer">
+                      Open in Drive
+                    </a>
+                  )}
+                </article>
+              ))}
+              {driveFiles.length === 0 && <p className="empty">No Drive files loaded yet.</p>}
+            </div>
+            {driveNextPageToken && (
+              <button
+                type="button"
+                onClick={() => loadGoogleDriveFiles(driveNextPageToken)}
+                disabled={!token || busy}
+              >
+                <RefreshCw size={16} />
+                Load more Drive files
+              </button>
+            )}
+            <label>
+              Manual Google Drive-style note
               <textarea
                 value={connectorContent}
                 onChange={(event) => setConnectorContent(event.target.value)}
