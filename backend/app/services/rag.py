@@ -388,6 +388,7 @@ class RagService:
         )
 
     def _insert_chunks(self, connection, document_id: str, chunks: list[str]) -> None:
+        embeddings = embedding_service.embed_many(chunks)
         if is_postgres_database():
             connection.executemany(
                 """
@@ -400,7 +401,7 @@ class RagService:
                         document_id,
                         index,
                         chunk,
-                        vector_literal(embedding_service.embed(chunk)),
+                        vector_literal(embeddings[index]),
                     )
                     for index, chunk in enumerate(chunks)
                 ],
@@ -418,7 +419,7 @@ class RagService:
                     document_id,
                     index,
                     chunk,
-                    encode_json(embedding_service.embed(chunk)),
+                    encode_json(embeddings[index]),
                 )
                 for index, chunk in enumerate(chunks)
             ],
