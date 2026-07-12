@@ -63,7 +63,13 @@ def query_documents(
     payload: RagQuery, user=Depends(get_current_user)
 ) -> RagAnswer:
     scan = prompt_guard_service.scan_text(payload.question)
-    answer = rag_service.answer(question=payload.question, role=user.role)
+    try:
+        answer = rag_service.answer(question=payload.question, role=user.role)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     audit_service.record(
         actor_id=user.user_id,
         event_type="documents.query",

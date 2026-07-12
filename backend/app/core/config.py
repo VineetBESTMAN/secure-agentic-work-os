@@ -31,6 +31,16 @@ class Settings(BaseSettings):
         validation_alias="APP_UPLOAD_DIR",
     )
     vector_dimensions: int = Field(default=384, validation_alias="APP_VECTOR_DIMENSIONS")
+    embedding_provider: str = Field(default="local", validation_alias="APP_EMBEDDING_PROVIDER")
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    openai_embedding_model: str = Field(
+        default="text-embedding-3-small",
+        validation_alias="OPENAI_EMBEDDING_MODEL",
+    )
+    openai_embedding_timeout_seconds: float = Field(
+        default=20.0,
+        validation_alias="OPENAI_EMBEDDING_TIMEOUT_SECONDS",
+    )
     oauth_redirect_base_url: str = Field(
         default="http://127.0.0.1:8000/api/connectors",
         validation_alias="APP_OAUTH_REDIRECT_BASE_URL",

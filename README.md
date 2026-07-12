@@ -142,6 +142,26 @@ cd backend
 
 When `DATABASE_URL` is set to PostgreSQL, the backend creates the `vector` extension, stores chunk embeddings in a `vector(384)` column, and ranks citations with cosine distance.
 
+## Embedding providers
+
+The app defaults to deterministic local embeddings so upload, RAG, and citations work without an API key:
+
+```text
+APP_EMBEDDING_PROVIDER=local
+APP_VECTOR_DIMENSIONS=384
+```
+
+For higher-quality semantic retrieval, enable OpenAI embeddings:
+
+```text
+APP_EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+APP_VECTOR_DIMENSIONS=384
+```
+
+The OpenAI provider uses the embeddings API with `text-embedding-3-small` by default and requests 384 output dimensions so it remains compatible with the local pgvector schema. After changing embedding providers or dimensions, re-index existing documents or re-upload them so stored chunk vectors match the active provider.
+
 ## OAuth connector setup
 
 Connectors are wired for real OAuth but require provider credentials. Add the relevant values to `.env`, then restart the backend:
@@ -210,7 +230,7 @@ The verification scripts build the stack, wait for backend readiness, sign in wi
 ## Suggested next steps
 
 1. Replace synchronous job completion with Redis and Celery workers.
-2. Swap deterministic local embeddings for OpenAI or sentence-transformer embeddings.
-3. Complete Google Drive OAuth file listing and selective import.
+2. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
+3. Add more real connectors after Google Drive, such as Gmail and Calendar imports.
 4. Add LangGraph state machines behind the persisted workflow records.
 5. Add production migrations with Alembic.
