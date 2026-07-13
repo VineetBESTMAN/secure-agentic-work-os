@@ -177,6 +177,11 @@ class JobRecord(BaseModel):
     updated_at: str | None = None
 
 
+class AsyncJobResponse(BaseModel):
+    job: JobRecord
+    message: str
+
+
 class ConnectorImportItem(BaseModel):
     filename: str
     content: str

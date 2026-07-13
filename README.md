@@ -31,7 +31,7 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - Document management for source inspection, metadata edits, delete, and re-index
 - Unsafe document review for prompt-injection flagged uploads
 - Policy engine with default document-access, tool-approval, and prompt-safety rules
-- Background job tracking for connector ingestion and future async workers
+- Redis/RQ background workers for document ingestion, reindexing, and connector imports
 - Persisted agent workflow plans for approval-backed automation
 - CI and Docker scaffolding for production-oriented validation
 - Approval workflow service for high-risk actions
@@ -44,7 +44,7 @@ This repository is designed to demonstrate the engineering patterns companies wa
 
 - PostgreSQL for app state
 - `pgvector` planned for embeddings
-- Redis planned for async tasks and caching
+- Redis queues for ingestion workers and future caching
 - Docker Compose starter for local development
 
 ## Repository layout
@@ -115,6 +115,32 @@ This starter treats security as a first-class product feature:
 8. Create an agent workflow and review the planned actions plus approval state.
 
 Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
+
+## Background ingestion workers
+
+The UI sends uploads, reindex requests, and manual connector imports to queued endpoints. Each request immediately returns a job ID, and the UI polls the job while an RQ worker performs extraction, chunking, embedding, and database persistence.
+
+Docker enables workers automatically:
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+The stack includes a dedicated `worker` service connected to Redis, PostgreSQL, and the shared upload volume. Jobs move through `queued`, `running`, `completed`, or `failed`, report progress in the dashboard, and retry worker failures up to three times.
+
+For local development without Redis, queued endpoints execute inline by default:
+
+```text
+APP_ASYNC_JOBS_ENABLED=false
+APP_ASYNC_JOBS_FALLBACK_SYNC=true
+```
+
+To run a local worker, set `APP_ASYNC_JOBS_ENABLED=true`, start Redis, and run this from `backend/`:
+
+```bash
+rq worker --url redis://127.0.0.1:6379/0 ingestion
+```
 
 ## PostgreSQL and pgvector mode
 
@@ -213,7 +239,7 @@ This starts:
 - FastAPI backend on `http://127.0.0.1:8000`
 - React preview server on `http://127.0.0.1:5173`
 - PostgreSQL with `pgvector`
-- Redis for future background workers
+- Redis and an RQ ingestion worker
 
 For a repeatable verification run, install and start Docker Desktop, then run one of these commands from the repo root:
 
@@ -229,8 +255,8 @@ The verification scripts build the stack, wait for backend readiness, sign in wi
 
 ## Suggested next steps
 
-1. Replace synchronous job completion with Redis and Celery workers.
+1. Add production migrations with Alembic.
 2. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
 3. Add more real connectors after Google Drive, such as Gmail and Calendar imports.
-4. Add LangGraph state machines behind the persisted workflow records.
-5. Add production migrations with Alembic.
+4. Add state-machine execution behind the persisted workflow records.
+5. Add organization-aware identity, permissions, and production deployment controls.

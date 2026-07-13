@@ -53,6 +53,13 @@ class JobService:
             )
         return self.get(job_id)
 
+    def fail(self, job_id: str, error: Exception | str) -> JobRecord:
+        return self.update(
+            job_id=job_id,
+            status="failed",
+            result={"progress": 100, "error": str(error)},
+        )
+
     def get(self, job_id: str) -> JobRecord:
         with get_connection() as connection:
             row = connection.execute(

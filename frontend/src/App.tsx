@@ -109,6 +109,11 @@ type JobRecord = {
   result: Record<string, unknown>;
 };
 
+type AsyncJobResponse = {
+  job: JobRecord;
+  message: string;
+};
+
 type AgentWorkflowRecord = {
   workflow_id: string;
   prompt: string;
@@ -203,6 +208,31 @@ export default function App() {
     }
   }
 
+  async function watchJob(jobId: string, onCompleted?: () => Promise<void>) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      try {
+        const job = await api<JobRecord>(`/api/jobs/${jobId}`);
+        setJobs((current) => [job, ...current.filter((item) => item.job_id !== job.job_id)]);
+        if (job.status === "completed") {
+          setMessage(String(job.result.message || `Job ${job.job_id} completed.`));
+          await refreshAll();
+          if (onCompleted) await onCompleted();
+          return;
+        }
+        if (job.status === "failed") {
+          setMessage(String(job.result.error || `Job ${job.job_id} failed.`));
+          await refreshAll();
+          return;
+        }
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "Could not refresh background job");
+        return;
+      }
+    }
+    setMessage(`Job ${jobId} is still running. Use Refresh to check it later.`);
+  }
+
   useEffect(() => {
     refreshAll().catch((error) => setMessage(error.message));
   }, [token]);
@@ -244,13 +274,14 @@ export default function App() {
       formData.append("file", selectedFile);
       formData.append("classification", classification);
       formData.append("owner_team", ownerTeam);
-      const document = await api<DocumentRecord>("/api/documents/upload", {
+      const result = await api<AsyncJobResponse>("/api/documents/upload/async", {
         method: "POST",
         body: formData,
       });
-      setMessage(`Uploaded ${document.filename} with ${document.chunk_count} chunks.`);
+      setJobs((current) => [result.job, ...current]);
+      setMessage(`${result.message} Job: ${result.job.job_id}`);
       setSelectedFile(null);
-      await refreshAll();
+      void watchJob(result.job.job_id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Upload failed");
     } finally {
@@ -317,13 +348,13 @@ export default function App() {
   async function reindexDocument(documentId: string) {
     setBusy(true);
     try {
-      const result = await api<{ document: DocumentRecord; message: string }>(
-        `/api/documents/${documentId}/reindex`,
+      const result = await api<AsyncJobResponse>(
+        `/api/documents/${documentId}/reindex-async`,
         { method: "POST" },
       );
-      setMessage(result.message);
-      await refreshAll();
-      await viewDocument(documentId);
+      setJobs((current) => [result.job, ...current]);
+      setMessage(`${result.message} Job: ${result.job.job_id}`);
+      void watchJob(result.job.job_id, () => viewDocument(documentId));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Reindex failed");
     } finally {
@@ -403,10 +434,7 @@ export default function App() {
   async function importGoogleDriveNote() {
     setBusy(true);
     try {
-      const result = await api<{
-        job: JobRecord;
-        imported_documents: DocumentRecord[];
-      }>("/api/connectors/import", {
+      const result = await api<AsyncJobResponse>("/api/connectors/import/async", {
         method: "POST",
         body: JSON.stringify({
           provider: "google",
@@ -420,10 +448,9 @@ export default function App() {
           ],
         }),
       });
-      setMessage(
-        `Imported ${result.imported_documents.length} Google Drive item through ${result.job.job_id}.`,
-      );
-      await refreshAll();
+      setJobs((current) => [result.job, ...current]);
+      setMessage(`${result.message} Job: ${result.job.job_id}`);
+      void watchJob(result.job.job_id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Import failed");
     } finally {
@@ -936,6 +963,10 @@ export default function App() {
                   <span>
                     {job.status} | {JSON.stringify(job.result)}
                   </span>
+                  <progress
+                    value={typeof job.result.progress === "number" ? job.result.progress : 0}
+                    max={100}
+                  />
                 </article>
               ))}
               {policies.length === 0 && jobs.length === 0 && (

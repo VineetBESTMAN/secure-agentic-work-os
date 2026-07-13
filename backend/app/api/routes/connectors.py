@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.core.rbac import require_scope
 from app.core.security import get_current_user
 from app.models.schemas import (
+    AsyncJobResponse,
     ConnectorImportRequest,
     ConnectorImportResponse,
     ConnectorRecord,
@@ -11,6 +12,7 @@ from app.models.schemas import (
     OAuthStartResponse,
 )
 from app.services.audit import audit_service
+from app.services.background_tasks import BackgroundQueueError, background_task_service
 from app.services.connectors import connector_service
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -61,6 +63,40 @@ def import_connector_items(
         },
     )
     return response
+
+
+@router.post(
+    "/import/async",
+    response_model=AsyncJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_connector_items(
+    payload: ConnectorImportRequest,
+    user=Depends(get_current_user),
+) -> AsyncJobResponse:
+    require_scope(user.scopes, "documents:write")
+    try:
+        job = background_task_service.enqueue_connector_items(
+            provider=payload.provider,
+            items=payload.items,
+            requested_by=user.user_id,
+        )
+    except BackgroundQueueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.import_queued",
+        detail={
+            "provider": payload.provider,
+            "items": len(payload.items),
+            "job_id": job.job_id,
+        },
+    )
+    return AsyncJobResponse(job=job, message="Connector import was queued.")
 
 
 @router.get("/google/drive/files", response_model=GoogleDriveFileListResponse)

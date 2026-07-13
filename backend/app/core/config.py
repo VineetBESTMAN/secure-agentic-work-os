@@ -30,6 +30,21 @@ class Settings(BaseSettings):
         default=str(BASE_DIR / "data" / "uploads"),
         validation_alias="APP_UPLOAD_DIR",
     )
+    async_jobs_enabled: bool = Field(
+        default=False, validation_alias="APP_ASYNC_JOBS_ENABLED"
+    )
+    async_jobs_fallback_sync: bool = Field(
+        default=True, validation_alias="APP_ASYNC_JOBS_FALLBACK_SYNC"
+    )
+    redis_url: str = Field(
+        default="redis://127.0.0.1:6379/0", validation_alias="REDIS_URL"
+    )
+    job_queue_name: str = Field(
+        default="ingestion", validation_alias="APP_JOB_QUEUE_NAME"
+    )
+    job_timeout_seconds: int = Field(
+        default=600, validation_alias="APP_JOB_TIMEOUT_SECONDS"
+    )
     vector_dimensions: int = Field(default=384, validation_alias="APP_VECTOR_DIMENSIONS")
     embedding_provider: str = Field(default="local", validation_alias="APP_EMBEDDING_PROVIDER")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
