@@ -26,6 +26,9 @@ class Settings(BaseSettings):
         validation_alias="APP_DATABASE_PATH",
     )
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    run_migrations_on_startup: bool = Field(
+        default=True, validation_alias="APP_RUN_MIGRATIONS_ON_STARTUP"
+    )
     upload_dir: str = Field(
         default=str(BASE_DIR / "data" / "uploads"),
         validation_alias="APP_UPLOAD_DIR",

@@ -3,13 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import agent, approvals, audit, auth, connectors, documents, health, jobs, mcp, policies
 from app.core.config import get_settings
-from app.core.database import initialize_database
+from app.core.migrations import upgrade_database
 from app.services.approval import approval_service
 from app.services.policies import policy_service
 from app.services.users import user_service
 
 settings = get_settings()
-initialize_database()
+if settings.run_migrations_on_startup:
+    upgrade_database()
 user_service.seed_demo_users()
 approval_service.seed_demo_request()
 policy_service.seed_defaults()

@@ -22,6 +22,15 @@ jobs:
       - name: Run backend tests
         working-directory: backend
         run: python -m pytest
+      - name: Verify migration round trip
+        working-directory: backend
+        env:
+          APP_DATABASE_PATH: data/migration-ci.db
+        run: |
+          python -m alembic upgrade head
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+          python -m alembic current --check-heads
 
   frontend:
     runs-on: ubuntu-latest

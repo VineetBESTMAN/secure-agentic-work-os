@@ -6,6 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml ./
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY app ./app
 
 RUN python -m pip install --upgrade pip && \

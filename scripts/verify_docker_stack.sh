@@ -31,6 +31,9 @@ docker compose up --build -d
 
 wait_http "http://127.0.0.1:8000/health" "Backend health"
 
+migration_revision="$(docker compose exec -T backend python -m alembic current --check-heads)"
+echo "Database migration head is active: ${migration_revision}"
+
 token="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@demo.local","password":"demo-password"}' \

@@ -24,7 +24,7 @@ This repository is designed to demonstrate the engineering patterns companies wa
 
 - FastAPI application with modular route groups
 - JWT utilities and role-aware request handling
-- SQLite persistence for users, documents, chunks, approvals, audit logs, and connectors
+- Alembic-versioned SQLite and PostgreSQL persistence for application state
 - Real upload ingestion for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
 - Local embedding RAG over uploaded document chunks with citations
 - Optional PostgreSQL + `pgvector` storage with HNSW vector indexing
@@ -168,6 +168,26 @@ cd backend
 
 When `DATABASE_URL` is set to PostgreSQL, the backend creates the `vector` extension, stores chunk embeddings in a `vector(384)` column, and ranks citations with cosine distance.
 
+## Database migrations
+
+Alembic owns the SQLite and PostgreSQL schema. Application startup runs `alembic upgrade head` before demo data is seeded, so existing installations are adopted without deleting documents and fresh installations receive the complete schema.
+
+Run migration commands from `backend/`:
+
+```bash
+python -m alembic current
+python -m alembic history
+python -m alembic upgrade head
+```
+
+Create each future schema change as a revision:
+
+```bash
+python -m alembic revision -m "describe the schema change"
+```
+
+Then implement `upgrade()` and `downgrade()` in the generated file and test both directions. Downgrading the initial baseline to `base` removes application tables, so back up production data before running destructive downgrade commands.
+
 ## Embedding providers
 
 The app defaults to deterministic local embeddings so upload, RAG, and citations work without an API key:
@@ -251,12 +271,12 @@ powershell -ExecutionPolicy Bypass -File scripts/verify_docker_stack.ps1
 bash scripts/verify_docker_stack.sh
 ```
 
-The verification scripts build the stack, wait for backend readiness, sign in with the demo admin user, import a sample connector note into PostgreSQL/pgvector-backed RAG storage, query it for a cited answer, and confirm the frontend is reachable.
+The verification scripts build the stack, verify the database is at the latest Alembic head, sign in with the demo admin user, import a sample connector note through Redis/RQ, query PostgreSQL/pgvector for a cited answer, and confirm the frontend is reachable.
 
 ## Suggested next steps
 
-1. Add production migrations with Alembic.
+1. Build the standards-compatible Security MCP server and approval-bound tool execution.
 2. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
-3. Add more real connectors after Google Drive, such as Gmail and Calendar imports.
-4. Add state-machine execution behind the persisted workflow records.
-5. Add organization-aware identity, permissions, and production deployment controls.
+3. Add state-machine execution behind the persisted workflow records.
+4. Add organization-aware identity, permissions, and tenant isolation.
+5. Add more real connectors after Google Drive, such as Gmail and Calendar imports.

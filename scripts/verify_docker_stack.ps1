@@ -55,6 +55,12 @@ try {
 
     Wait-Http -Url "http://127.0.0.1:8000/health" -Name "Backend health"
 
+    $migrationRevision = docker compose exec -T backend python -m alembic current --check-heads
+    if ($LASTEXITCODE -ne 0) {
+        throw "Backend database is not at the latest Alembic revision."
+    }
+    Write-Host "Database migration head is active: $migrationRevision"
+
     $loginBody = @{
         email = "admin@demo.local"
         password = "demo-password"

@@ -5,6 +5,7 @@ x-app-environment: &app-environment
   APP_EMBEDDING_PROVIDER: ${APP_EMBEDDING_PROVIDER:-local}
   APP_JOB_QUEUE_NAME: ingestion
   APP_JOB_TIMEOUT_SECONDS: "600"
+  APP_RUN_MIGRATIONS_ON_STARTUP: "true"
   APP_SECRET_KEY: change-me
   APP_UPLOAD_DIR: /app/data/uploads
   APP_VECTOR_DIMENSIONS: "384"
@@ -42,6 +43,8 @@ services:
     volumes:
       - backend_data:/app/data
     depends_on:
+      backend:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
