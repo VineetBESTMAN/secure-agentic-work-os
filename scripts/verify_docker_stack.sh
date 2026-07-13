@@ -37,15 +37,27 @@ token="$(curl --fail --silent \
   http://127.0.0.1:8000/api/auth/login \
   | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")"
 
-import_status="$(curl --fail --silent \
+queued_job_id="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${token}" \
   -d '{"provider":"google","items":[{"filename":"docker-smoke-note.txt","content":"Docker smoke note: Acme renewal requires manager approval before any external contract summary is sent.","mime_type":"text/plain","classification":"internal","owner_team":"platform"}]}' \
-  http://127.0.0.1:8000/api/connectors/import \
-  | python -c "import json,sys; print(json.load(sys.stdin)['job']['status'])")"
+  http://127.0.0.1:8000/api/connectors/import/async \
+  | python -c "import json,sys; print(json.load(sys.stdin)['job']['job_id'])")"
+
+import_status="queued"
+for _ in $(seq 1 120); do
+  job_json="$(curl --fail --silent \
+    -H "Authorization: Bearer ${token}" \
+    "http://127.0.0.1:8000/api/jobs/${queued_job_id}")"
+  import_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$job_json")"
+  if [[ "$import_status" == "completed" || "$import_status" == "failed" ]]; then
+    break
+  fi
+  sleep 1
+done
 
 if [[ "$import_status" != "completed" ]]; then
-  echo "Connector import smoke test did not complete successfully." >&2
+  echo "Async connector import smoke test did not complete successfully: ${import_status}" >&2
   exit 1
 fi
 
@@ -61,7 +73,7 @@ if [[ "$citations_count" -lt 1 ]]; then
   exit 1
 fi
 
-echo "Backend API, Postgres persistence, connector import, and RAG smoke tests passed."
+echo "Backend API, Postgres persistence, Redis worker import, and RAG smoke tests passed."
 wait_http "http://127.0.0.1:5173" "Frontend preview"
 echo "Docker stack verification passed."
 echo "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

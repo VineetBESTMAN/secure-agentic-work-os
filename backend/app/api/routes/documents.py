@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from app.core.rbac import require_roles, require_scope
 from app.core.security import get_current_user
 from app.models.schemas import (
+    AsyncJobResponse,
     DocumentDetail,
     DocumentRecord,
     DocumentUpdateRequest,
@@ -11,10 +12,19 @@ from app.models.schemas import (
     ReindexResponse,
 )
 from app.services.audit import audit_service
+from app.services.background_tasks import BackgroundQueueError, background_task_service
 from app.services.prompt_guard import prompt_guard_service
 from app.services.rag import rag_service
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+def _validate_classification(classification: str) -> None:
+    if classification not in {"public", "internal", "restricted"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="classification must be public, internal, or restricted",
+        )
 
 
 @router.post("/upload", response_model=DocumentRecord)
@@ -25,11 +35,7 @@ async def upload_document(
     user=Depends(get_current_user),
 ) -> DocumentRecord:
     require_scope(user.scopes, "documents:write")
-    if classification not in {"public", "internal", "restricted"}:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="classification must be public, internal, or restricted",
-        )
+    _validate_classification(classification)
 
     try:
         document = rag_service.ingest_file(
@@ -56,6 +62,46 @@ async def upload_document(
         },
     )
     return document
+
+
+@router.post(
+    "/upload/async",
+    response_model=AsyncJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def queue_document_upload(
+    file: UploadFile = File(...),
+    classification: str = Form(default="internal"),
+    owner_team: str = Form(default="general"),
+    user=Depends(get_current_user),
+) -> AsyncJobResponse:
+    require_scope(user.scopes, "documents:write")
+    _validate_classification(classification)
+    try:
+        job = background_task_service.enqueue_document(
+            filename=file.filename or "uploaded-document.txt",
+            data=await file.read(),
+            classification=classification,
+            owner_team=owner_team,
+            uploaded_by=user.user_id,
+        )
+    except BackgroundQueueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="documents.upload_queued",
+        detail={"job_id": job.job_id, "filename": file.filename or "uploaded-document.txt"},
+    )
+    return AsyncJobResponse(job=job, message="Document ingestion was queued.")
 
 
 @router.post("/query", response_model=RagAnswer)
@@ -184,6 +230,43 @@ def reindex_document(
         detail={"document_id": document_id, "chunks": document.chunk_count},
     )
     return ReindexResponse(document=document, message="Document reindexed successfully.")
+
+
+@router.post(
+    "/{document_id}/reindex-async",
+    response_model=AsyncJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def queue_document_reindex(
+    document_id: str, user=Depends(get_current_user)
+) -> AsyncJobResponse:
+    require_scope(user.scopes, "documents:write")
+    try:
+        document = rag_service.get_document(document_id=document_id)
+        if not rag_service.can_access_document(document=document, role=user.role):
+            raise PermissionError("You do not have access to this document.")
+        job = background_task_service.enqueue_reindex(
+            document_id=document_id,
+            role=user.role,
+            requested_by=user.user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="documents.reindex_queued",
+        detail={"document_id": document_id, "job_id": job.job_id},
+    )
+    return AsyncJobResponse(job=job, message="Document reindex was queued.")
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

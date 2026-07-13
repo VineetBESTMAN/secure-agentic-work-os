@@ -84,15 +84,25 @@ try {
         )
     } | ConvertTo-Json -Depth 5
 
-    $import = Invoke-RestMethod `
+    $queuedImport = Invoke-RestMethod `
         -Method Post `
-        -Uri "http://127.0.0.1:8000/api/connectors/import" `
+        -Uri "http://127.0.0.1:8000/api/connectors/import/async" `
         -Headers $headers `
         -ContentType "application/json" `
         -Body $importBody
 
-    if ($import.job.status -ne "completed" -or $import.imported_documents.Count -lt 1) {
-        throw "Connector import smoke test did not complete successfully."
+    $importJob = $queuedImport.job
+    $jobDeadline = (Get-Date).AddSeconds(120)
+    while ($importJob.status -in @("queued", "running") -and (Get-Date) -lt $jobDeadline) {
+        Start-Sleep -Seconds 1
+        $importJob = Invoke-RestMethod `
+            -Method Get `
+            -Uri "http://127.0.0.1:8000/api/jobs/$($importJob.job_id)" `
+            -Headers $headers
+    }
+
+    if ($importJob.status -ne "completed" -or $importJob.result.imported_documents -lt 1) {
+        throw "Async connector import smoke test did not complete successfully: $($importJob.status)"
     }
 
     $queryBody = @{
@@ -110,7 +120,7 @@ try {
         throw "RAG smoke test did not return a citation."
     }
 
-    Write-Host "Backend API, Postgres persistence, connector import, and RAG smoke tests passed."
+    Write-Host "Backend API, Postgres persistence, Redis worker import, and RAG smoke tests passed."
     Wait-Http -Url "http://127.0.0.1:5173" -Name "Frontend preview"
     Write-Host "Docker stack verification passed."
     Write-Host "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

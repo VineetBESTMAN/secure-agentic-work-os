@@ -1,17 +1,23 @@
+x-app-environment: &app-environment
+  APP_ENV: docker
+  APP_ASYNC_JOBS_ENABLED: "true"
+  APP_ASYNC_JOBS_FALLBACK_SYNC: "false"
+  APP_EMBEDDING_PROVIDER: ${APP_EMBEDDING_PROVIDER:-local}
+  APP_JOB_QUEUE_NAME: ingestion
+  APP_JOB_TIMEOUT_SECONDS: "600"
+  APP_SECRET_KEY: change-me
+  APP_UPLOAD_DIR: /app/data/uploads
+  APP_VECTOR_DIMENSIONS: "384"
+  DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentic_work_os
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+  REDIS_URL: redis://redis:6379/0
+
 services:
   backend:
     build:
       context: ./backend
-    environment:
-      APP_ENV: docker
-      APP_EMBEDDING_PROVIDER: ${APP_EMBEDDING_PROVIDER:-local}
-      APP_SECRET_KEY: change-me
-      APP_UPLOAD_DIR: /app/data/uploads
-      APP_VECTOR_DIMENSIONS: "384"
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentic_work_os
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
-      REDIS_URL: redis://redis:6379/0
+    environment: *app-environment
     ports:
       - "8000:8000"
     volumes:
@@ -27,6 +33,20 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+
+  worker:
+    build:
+      context: ./backend
+    command: ["rq", "worker", "--url", "redis://redis:6379/0", "ingestion"]
+    environment: *app-environment
+    volumes:
+      - backend_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
   frontend:
     build:

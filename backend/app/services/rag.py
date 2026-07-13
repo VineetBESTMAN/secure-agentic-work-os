@@ -153,7 +153,14 @@ class RagService:
         classification: str,
         owner_team: str,
         uploaded_by: str,
+        document_id: str | None = None,
     ) -> DocumentRecord:
+        if document_id:
+            try:
+                return self.get_document(document_id=document_id)
+            except ValueError:
+                pass
+
         text = _extract_text(filename=filename, data=data)
         cleaned = _clean_text(text)
         if not cleaned:
@@ -167,7 +174,7 @@ class RagService:
         upload_dir = Path(settings.upload_dir)
         upload_dir.mkdir(parents=True, exist_ok=True)
 
-        document_id = f"doc_{uuid4().hex}"
+        document_id = document_id or f"doc_{uuid4().hex}"
         stored_name = f"{document_id}_{Path(filename).name}"
         (upload_dir / stored_name).write_bytes(data)
 

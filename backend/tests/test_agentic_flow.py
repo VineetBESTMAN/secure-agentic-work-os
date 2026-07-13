@@ -50,6 +50,64 @@ def test_authenticated_document_query_returns_citation() -> None:
     assert "Urgent customer escalations" in body["citations"][0]["excerpt"]
 
 
+def test_async_document_ingestion_and_reindex_complete_with_inline_fallback() -> None:
+    headers = _auth_headers()
+    upload = client.post(
+        "/api/documents/upload/async",
+        headers=headers,
+        files={
+            "file": (
+                "async-renewal-note.txt",
+                "The renewal summary requires manager approval before external distribution.",
+                "text/plain",
+            )
+        },
+        data={"classification": "internal", "owner_team": "revenue"},
+    )
+
+    assert upload.status_code == 202
+    upload_job = upload.json()["job"]
+    assert upload_job["status"] == "completed"
+    assert upload_job["result"]["progress"] == 100
+    document_id = upload_job["result"]["document_id"]
+
+    job = client.get(f"/api/jobs/{upload_job['job_id']}", headers=headers)
+    assert job.status_code == 200
+    assert job.json()["result"]["document_id"] == document_id
+
+    reindex = client.post(
+        f"/api/documents/{document_id}/reindex-async",
+        headers=headers,
+    )
+    assert reindex.status_code == 202
+    assert reindex.json()["job"]["status"] == "completed"
+    assert reindex.json()["job"]["result"]["chunk_count"] == 1
+
+
+def test_async_connector_import_completes_with_inline_fallback() -> None:
+    response = client.post(
+        "/api/connectors/import/async",
+        headers=_auth_headers(),
+        json={
+            "provider": "google",
+            "items": [
+                {
+                    "filename": "queued-drive-note.txt",
+                    "content": "Queued connector imports are indexed by a background worker.",
+                    "classification": "internal",
+                    "owner_team": "platform",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    job = response.json()["job"]
+    assert job["status"] == "completed"
+    assert job["result"]["imported_documents"] == 1
+    assert len(job["result"]["document_ids"]) == 1
+
+
 def test_document_management_lifecycle() -> None:
     document = _upload_document(
         filename="renewal-policy.txt",
