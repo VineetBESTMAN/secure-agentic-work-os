@@ -24,7 +24,9 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
 
     assert "documents" in tables
     assert "background_jobs" in tables
-    assert revision == ("20260714_0001",)
+    assert "mcp_tool_executions" in tables
+    assert "workspace_tasks" in tables
+    assert revision == ("20260714_0002",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -39,7 +41,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert revision == ("20260714_0001",)
+    assert revision == ("20260714_0002",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -76,5 +78,5 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         ).fetchone()
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260714_0001",)
+    assert revision == ("20260714_0002",)
     assert documents_exists == (1,)

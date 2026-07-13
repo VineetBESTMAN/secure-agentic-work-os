@@ -84,6 +84,17 @@ class UserService:
             ).fetchone()
         if row is None or not _verify_password(password, row["password_hash"]):
             return None
+        return self._row_to_user(row)
+
+    def get_by_id(self, user_id: str) -> UserContext | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return self._row_to_user(row) if row is not None else None
+
+    def _row_to_user(self, row) -> UserContext:
         return UserContext(
             user_id=row["user_id"],
             email=row["email"],

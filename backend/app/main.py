@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -5,6 +7,7 @@ from app.api.routes import agent, approvals, audit, auth, connectors, documents,
 from app.core.config import get_settings
 from app.core.migrations import upgrade_database
 from app.services.approval import approval_service
+from app.services.mcp_protocol import security_mcp, security_mcp_http_app
 from app.services.policies import policy_service
 from app.services.users import user_service
 
@@ -15,10 +18,18 @@ user_service.seed_demo_users()
 approval_service.seed_demo_request()
 policy_service.seed_defaults()
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    async with security_mcp.session_manager.run():
+        yield
+
+
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     description="Secure enterprise starter for agentic workflows with approval gates.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -39,3 +50,4 @@ app.include_router(mcp.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(policies.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
+app.mount("/protocol", security_mcp_http_app)

@@ -155,6 +155,167 @@ h2 {
   padding: 16px;
 }
 
+.security-console {
+  border-color: #8fb7b5;
+  background:
+    radial-gradient(circle at 92% 0%, rgba(47, 111, 115, 0.14), transparent 32%),
+    linear-gradient(145deg, #ffffff 0%, #f4faf9 100%);
+}
+
+.console-heading {
+  justify-content: space-between;
+}
+
+.console-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.console-heading small {
+  overflow-wrap: anywhere;
+}
+
+.protocol-badge,
+.status-pill {
+  width: fit-content;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.protocol-badge {
+  border: 1px solid #7ca8a5;
+  background: #e5f2f1;
+  color: #235e61;
+  padding: 6px 9px;
+}
+
+.security-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.security-summary span {
+  border-left: 3px solid #2f6f73;
+  background: rgba(255, 255, 255, 0.78);
+  color: #345158;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+}
+
+.mcp-runner {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 14px;
+  border-top: 1px solid #cfe0df;
+  border-bottom: 1px solid #cfe0df;
+  padding: 14px 0;
+}
+
+.tool-contract {
+  display: grid;
+  gap: 7px;
+  border-radius: 6px;
+  background: #eaf4f3;
+  padding: 11px;
+}
+
+.tool-contract p {
+  color: #294a50;
+  line-height: 1.45;
+}
+
+.code-input,
+.execution-card code,
+.execution-card pre,
+.item code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.code-input {
+  min-height: 142px;
+  background: #132b2e;
+  color: #d9f1ed;
+  border-color: #24494c;
+}
+
+.execution-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(245px, 1fr));
+  gap: 10px;
+}
+
+.execution-card {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid #cfe0df;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.86);
+  padding: 11px;
+}
+
+.execution-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status-pill {
+  background: #e3e9ed;
+  color: #42515d;
+  padding: 4px 7px;
+}
+
+.status-completed {
+  background: #dcefe5;
+  color: #276342;
+}
+
+.status-pending_approval,
+.status-running {
+  background: #fff1ce;
+  color: #795911;
+}
+
+.status-blocked,
+.status-rejected,
+.status-failed {
+  background: #f9e2dc;
+  color: #923f2e;
+}
+
+.execution-card code,
+.item code {
+  color: #2a5f63;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.execution-card pre {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  border-radius: 5px;
+  background: #172f32;
+  color: #d9f1ed;
+  padding: 9px;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+}
+
+.execution-card em {
+  color: #9b402d;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
 .primary-panel {
   min-height: 260px;
 }
@@ -252,6 +413,7 @@ h2 {
 
   .panel-grid,
   .columns,
+  .mcp-runner,
   .split,
   .split.three {
     grid-template-columns: 1fr;

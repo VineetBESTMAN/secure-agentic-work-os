@@ -9,7 +9,7 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - Retrieval-augmented answers over internal documents with citations
 - Role-based access and policy-aware retrieval
 - Approval-gated agent workflows instead of unchecked tool execution
-- MCP-style tool routing behind a security gateway
+- Standards-compatible MCP tool routing behind a security gateway
 - Prompt injection detection, audit logging, and action traceability
 
 ## Architecture
@@ -35,7 +35,8 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - Persisted agent workflow plans for approval-backed automation
 - CI and Docker scaffolding for production-oriented validation
 - Approval workflow service for high-risk actions
-- MCP gateway service with scoped permission checks
+- Authenticated MCP Streamable HTTP server with server-owned scopes and structured tools
+- Approval-bound tool executions with immutable payload hashes and replay protection
 - Prompt guard for suspicious content detection
 - OAuth-ready connector endpoints for Google Workspace, GitHub, Slack, Notion, and Jira
 - Audit service for immutable-style activity trails
@@ -43,7 +44,7 @@ This repository is designed to demonstrate the engineering patterns companies wa
 ### Data and infra
 
 - PostgreSQL for app state
-- `pgvector` planned for embeddings
+- `pgvector` storage with HNSW indexing for embeddings
 - Redis queues for ingestion workers and future caching
 - Docker Compose starter for local development
 
@@ -113,6 +114,32 @@ This starter treats security as a first-class product feature:
 6. Use document actions to view chunks, edit metadata, re-index, or delete documents.
 7. Import a Google Drive-style note from the connector panel and watch the job list.
 8. Create an agent workflow and review the planned actions plus approval state.
+9. Use the Security MCP Console to run document search or create a persistent task.
+
+## Security MCP server
+
+The standards-compatible MCP endpoint is:
+
+```text
+http://127.0.0.1:8000/protocol/mcp
+```
+
+It uses the same JWT bearer token as the REST API and currently advertises four structured tools:
+
+- `search_documents` runs immediately with `documents:read`.
+- `create_task` persists a task immediately with `tasks:write`.
+- `send_email` requires separate human approval and completes in safe simulation mode.
+- `export_data` requires separate human approval before returning accessible document metadata.
+
+The server determines each required scope; a client-supplied scope cannot downgrade security. Every request is validated and prompt-scanned, persisted with a canonical SHA-256 argument hash, and audited. Approval resumes only the exact stored payload, requesters cannot approve their own action, and repeat decisions are rejected.
+
+To test the complete approval lifecycle in the UI:
+
+1. Sign in as `admin@demo.local` with `demo-password`.
+2. Run `send_email` from the Security MCP Console.
+3. Sign out, then sign in as `manager@demo.local` with `demo-password`.
+4. Approve the pending action in the Approvals panel.
+5. Confirm that the execution changes to `completed` with `delivery_mode: simulated`; no external email is sent.
 
 Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
 
@@ -275,8 +302,8 @@ The verification scripts build the stack, verify the database is at the latest A
 
 ## Suggested next steps
 
-1. Build the standards-compatible Security MCP server and approval-bound tool execution.
-2. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
-3. Add state-machine execution behind the persisted workflow records.
-4. Add organization-aware identity, permissions, and tenant isolation.
+1. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
+2. Add state-machine execution behind the persisted workflow records.
+3. Add organization-aware identity, permissions, and tenant isolation.
+4. Replace simulated MCP side effects with provider-backed delivery adapters.
 5. Add more real connectors after Google Drive, such as Gmail and Calendar imports.

@@ -61,6 +61,8 @@ type ApprovalRecord = {
   requested_by: string;
   status: "pending" | "approved" | "rejected";
   reviewed_by: string | null;
+  execution_id: string | null;
+  arguments_hash: string | null;
 };
 
 type AuditEvent = {
@@ -130,6 +132,44 @@ type AgentWorkflowRecord = {
   };
 };
 
+type MCPToolDefinition = {
+  name: string;
+  description: string;
+  required_scope: string;
+  approval_required: boolean;
+  side_effect: boolean;
+  input_schema: Record<string, unknown>;
+};
+
+type MCPExecutionRecord = {
+  execution_id: string;
+  tool_name: string;
+  requested_by: string;
+  required_scope: string;
+  arguments: Record<string, unknown>;
+  arguments_hash: string;
+  status: "running" | "pending_approval" | "completed" | "blocked" | "rejected" | "failed";
+  approval_id: string | null;
+  result: Record<string, unknown>;
+  error: string | null;
+  created_at: string | null;
+};
+
+const MCP_ARGUMENT_TEMPLATES: Record<string, Record<string, unknown>> = {
+  search_documents: { question: "What requires manager approval?" },
+  create_task: {
+    title: "Review client renewal",
+    description: "Confirm the contract summary before follow-up.",
+    due_date: "2026-07-21",
+  },
+  send_email: {
+    to: "client@example.com",
+    subject: "Renewal follow-up",
+    body: "The approved summary is ready for review.",
+  },
+  export_data: { classification: "internal", limit: 25 },
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export default function App() {
@@ -153,6 +193,12 @@ export default function App() {
   const [policies, setPolicies] = useState<PolicyRecord[]>([]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [workflows, setWorkflows] = useState<AgentWorkflowRecord[]>([]);
+  const [mcpTools, setMcpTools] = useState<MCPToolDefinition[]>([]);
+  const [mcpExecutions, setMcpExecutions] = useState<MCPExecutionRecord[]>([]);
+  const [selectedMcpTool, setSelectedMcpTool] = useState("search_documents");
+  const [mcpArguments, setMcpArguments] = useState(
+    JSON.stringify(MCP_ARGUMENT_TEMPLATES.search_documents, null, 2),
+  );
   const [query, setQuery] = useState("What does this document say about urgent work?");
   const [agentPrompt, setAgentPrompt] = useState("Find urgent client work and send a reply");
   const [connectorContent, setConnectorContent] = useState(
@@ -189,14 +235,18 @@ export default function App() {
 
   async function refreshAll() {
     if (!token) return;
-    const [documentData, approvalData, connectorData] = await Promise.all([
+    const [documentData, approvalData, connectorData, toolData, executionData] = await Promise.all([
       api<DocumentRecord[]>("/api/documents/library"),
       api<ApprovalRecord[]>("/api/approvals"),
       api<ConnectorRecord[]>("/api/connectors"),
+      api<MCPToolDefinition[]>("/api/mcp/tools"),
+      api<MCPExecutionRecord[]>("/api/mcp/executions"),
     ]);
     setDocuments(documentData);
     setApprovals(approvalData);
     setConnectors(connectorData);
+    setMcpTools(toolData);
+    setMcpExecutions(executionData);
     setWorkflows(await api<AgentWorkflowRecord[]>("/api/agent/workflows"));
     if (user?.scopes.includes("audit:read")) {
       setAuditEvents(await api<AuditEvent[]>("/api/audit/events"));
@@ -393,21 +443,34 @@ export default function App() {
     }
   }
 
-  async function createSendEmailApproval() {
+  function chooseMcpTool(toolName: string) {
+    setSelectedMcpTool(toolName);
+    setMcpArguments(JSON.stringify(MCP_ARGUMENT_TEMPLATES[toolName] || {}, null, 2));
+  }
+
+  async function runMcpTool(event: FormEvent) {
+    event.preventDefault();
     setBusy(true);
     try {
-      const result = await api<{ status: string; message: string }>("/api/mcp/tool-call", {
+      const argumentsPayload = JSON.parse(mcpArguments) as Record<string, unknown>;
+      const execution = await api<MCPExecutionRecord>("/api/mcp/executions", {
         method: "POST",
         body: JSON.stringify({
-          tool_name: "send_email",
-          scope: "email:send",
-          arguments: { to: "client@example.com", subject: "Follow-up" },
+          tool_name: selectedMcpTool,
+          arguments: argumentsPayload,
         }),
       });
-      setMessage(result.message);
+      const nextStep =
+        execution.status === "pending_approval"
+          ? " Switch accounts and approve it as a different manager or admin."
+          : "";
+      setMessage(
+        `${execution.tool_name} execution ${execution.execution_id} is ${execution.status}.${nextStep}`,
+      );
       await refreshAll();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Tool call failed");
+      const detail = error instanceof SyntaxError ? "Arguments must be valid JSON." : String(error);
+      setMessage(detail);
     } finally {
       setBusy(false);
     }
@@ -551,6 +614,7 @@ export default function App() {
 
   const googleConnector = connectors.find((connector) => connector.provider === "google");
   const googleDriveReady = googleConnector?.status === "connected";
+  const selectedMcpDefinition = mcpTools.find((tool) => tool.name === selectedMcpTool);
 
   return (
     <main className="app-shell">
@@ -676,6 +740,90 @@ export default function App() {
           </section>
         )}
 
+        <section className="panel security-console">
+          <div className="panel-title console-heading">
+            <div>
+              <ShieldCheck size={20} />
+              <div>
+                <h2>Security MCP Console</h2>
+                <small>Authenticated Streamable HTTP: {API_BASE}/protocol/mcp</small>
+              </div>
+            </div>
+            <span className="protocol-badge">MCP 2025-11-25</span>
+          </div>
+
+          <div className="security-summary">
+            <span>Server-owned scopes</span>
+            <span>Immutable payload hashes</span>
+            <span>Human approval resume</span>
+            <span>Prompt safety scan</span>
+          </div>
+
+          <form className="mcp-runner" onSubmit={runMcpTool}>
+            <div className="stack">
+              <label>
+                Tool
+                <select
+                  value={selectedMcpTool}
+                  onChange={(event) => chooseMcpTool(event.target.value)}
+                >
+                  {mcpTools.map((tool) => (
+                    <option key={tool.name} value={tool.name}>
+                      {tool.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedMcpDefinition && (
+                <div className="tool-contract">
+                  <p>{selectedMcpDefinition.description}</p>
+                  <small>
+                    Scope: {selectedMcpDefinition.required_scope} | {" "}
+                    {selectedMcpDefinition.approval_required ? "approval required" : "runs immediately"}
+                  </small>
+                </div>
+              )}
+            </div>
+            <div className="stack">
+              <label>
+                Validated JSON arguments
+                <textarea
+                  className="code-input"
+                  value={mcpArguments}
+                  onChange={(event) => setMcpArguments(event.target.value)}
+                />
+              </label>
+              <button type="submit" disabled={!token || busy || !selectedMcpDefinition}>
+                <ShieldCheck size={16} />
+                Run through security gateway
+              </button>
+            </div>
+          </form>
+
+          <div className="execution-list">
+            {mcpExecutions.slice(0, 12).map((execution) => (
+              <article key={execution.execution_id} className="execution-card">
+                <div className="execution-title">
+                  <strong>{execution.tool_name}</strong>
+                  <span className={`status-pill status-${execution.status}`}>
+                    {execution.status.replace("_", " ")}
+                  </span>
+                </div>
+                <small>{execution.execution_id}</small>
+                <code title={execution.arguments_hash}>sha256:{execution.arguments_hash.slice(0, 16)}...</code>
+                {execution.approval_id && <small>Approval: {execution.approval_id}</small>}
+                {execution.error && <em>{execution.error}</em>}
+                {Object.keys(execution.result).length > 0 && (
+                  <pre>{JSON.stringify(execution.result, null, 2)}</pre>
+                )}
+              </article>
+            ))}
+            {mcpExecutions.length === 0 && (
+              <p className="empty">Run a tool to create the first secured execution.</p>
+            )}
+          </div>
+        </section>
+
         <section className="columns">
           <section className="panel">
             <div className="panel-title">
@@ -716,16 +864,21 @@ export default function App() {
               <ShieldCheck size={18} />
               <h2>Approvals</h2>
             </div>
-            <button type="button" onClick={createSendEmailApproval} disabled={!token || busy}>
-              <ShieldCheck size={16} />
-              Test send-email gate
-            </button>
             <div className="item-list">
               {approvals.map((approval) => (
                 <article key={approval.approval_id} className="item">
                   <strong>{approval.action_id}</strong>
                   <span>{approval.status}</span>
-                  {approval.status === "pending" && (
+                  <small>Requested by: {approval.requested_by}</small>
+                  {approval.execution_id && <small>Execution: {approval.execution_id}</small>}
+                  {approval.arguments_hash && (
+                    <code title={approval.arguments_hash}>
+                      sha256:{approval.arguments_hash.slice(0, 16)}...
+                    </code>
+                  )}
+                  {approval.status === "pending" &&
+                    (user?.role === "admin" || user?.role === "manager") &&
+                    approval.requested_by !== user?.user_id && (
                     <div className="button-row">
                       <button type="button" onClick={() => decideApproval(approval.approval_id, true)}>
                         <CheckCircle2 size={16} />
@@ -737,8 +890,12 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                  {approval.status === "pending" && approval.requested_by === user?.user_id && (
+                    <small>Self-approval is blocked. Sign in as a different manager or admin.</small>
+                  )}
                 </article>
               ))}
+              {approvals.length === 0 && <p className="empty">No approvals visible.</p>}
             </div>
           </section>
         </section>

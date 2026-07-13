@@ -126,7 +126,69 @@ try {
         throw "RAG smoke test did not return a citation."
     }
 
-    Write-Host "Backend API, Postgres persistence, Redis worker import, and RAG smoke tests passed."
+    $taskBody = @{
+        tool_name = "create_task"
+        arguments = @{
+            title = "Verify Docker Security MCP"
+            description = "Created by the repeatable stack verification."
+        }
+    } | ConvertTo-Json -Depth 4
+    $taskExecution = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/mcp/executions" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $taskBody
+    if ($taskExecution.status -ne "completed" -or -not $taskExecution.result.task_id) {
+        throw "Security MCP task execution did not persist successfully."
+    }
+
+    $emailBody = @{
+        tool_name = "send_email"
+        arguments = @{
+            to = "client@example.com"
+            subject = "Docker Security MCP verification"
+            body = "This approved message must remain simulated."
+        }
+    } | ConvertTo-Json -Depth 4
+    $emailExecution = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/mcp/executions" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $emailBody
+    if ($emailExecution.status -ne "pending_approval" -or -not $emailExecution.approval_id) {
+        throw "Security MCP email execution did not enter approval state."
+    }
+
+    $managerLoginBody = @{
+        email = "manager@demo.local"
+        password = "demo-password"
+    } | ConvertTo-Json
+    $managerLogin = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/auth/login" `
+        -ContentType "application/json" `
+        -Body $managerLoginBody
+    $managerHeaders = @{ Authorization = "Bearer $($managerLogin.access_token)" }
+    Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/approvals/$($emailExecution.approval_id)/decision" `
+        -Headers $managerHeaders `
+        -ContentType "application/json" `
+        -Body '{"approved":true}' | Out-Null
+    $approvedExecution = Invoke-RestMethod `
+        -Method Get `
+        -Uri "http://127.0.0.1:8000/api/mcp/executions/$($emailExecution.execution_id)" `
+        -Headers $managerHeaders
+    if (
+        $approvedExecution.status -ne "completed" -or
+        $approvedExecution.result.delivery_mode -ne "simulated"
+    ) {
+        throw "Security MCP approval did not resume the exact simulated email execution."
+    }
+
+    Write-Host "Backend API, Postgres, Redis worker, RAG, and Security MCP smoke tests passed."
     Wait-Http -Url "http://127.0.0.1:5173" -Name "Frontend preview"
     Write-Host "Docker stack verification passed."
     Write-Host "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

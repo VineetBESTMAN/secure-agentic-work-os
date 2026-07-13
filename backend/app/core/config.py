@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     require_approval_for_export: bool = Field(
         default=True, validation_alias="APP_REQUIRE_APPROVAL_FOR_EXPORT"
     )
+    mcp_issuer_url: str = Field(
+        default="http://127.0.0.1:8000",
+        validation_alias="APP_MCP_ISSUER_URL",
+    )
+    mcp_server_url: str = Field(
+        default="http://127.0.0.1:8000/protocol/mcp",
+        validation_alias="APP_MCP_SERVER_URL",
+    )
     database_path: str = Field(
         default=str(BASE_DIR / "data" / "workos.db"),
         validation_alias="APP_DATABASE_PATH",

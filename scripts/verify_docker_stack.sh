@@ -76,7 +76,53 @@ if [[ "$citations_count" -lt 1 ]]; then
   exit 1
 fi
 
-echo "Backend API, Postgres persistence, Redis worker import, and RAG smoke tests passed."
+task_execution="$(curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${token}" \
+  -d '{"tool_name":"create_task","arguments":{"title":"Verify Docker Security MCP","description":"Created by the repeatable stack verification."}}' \
+  http://127.0.0.1:8000/api/mcp/executions)"
+task_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$task_execution")"
+task_id="$(python -c "import json,sys; print(json.load(sys.stdin)['result'].get('task_id',''))" <<<"$task_execution")"
+if [[ "$task_status" != "completed" || -z "$task_id" ]]; then
+  echo "Security MCP task execution did not persist successfully." >&2
+  exit 1
+fi
+
+email_execution="$(curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${token}" \
+  -d '{"tool_name":"send_email","arguments":{"to":"client@example.com","subject":"Docker Security MCP verification","body":"This approved message must remain simulated."}}' \
+  http://127.0.0.1:8000/api/mcp/executions)"
+email_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$email_execution")"
+approval_id="$(python -c "import json,sys; print(json.load(sys.stdin).get('approval_id',''))" <<<"$email_execution")"
+execution_id="$(python -c "import json,sys; print(json.load(sys.stdin)['execution_id'])" <<<"$email_execution")"
+if [[ "$email_status" != "pending_approval" || -z "$approval_id" ]]; then
+  echo "Security MCP email execution did not enter approval state." >&2
+  exit 1
+fi
+
+manager_token="$(curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -d '{"email":"manager@demo.local","password":"demo-password"}' \
+  http://127.0.0.1:8000/api/auth/login \
+  | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")"
+curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${manager_token}" \
+  -d '{"approved":true}' \
+  "http://127.0.0.1:8000/api/approvals/${approval_id}/decision" >/dev/null
+
+approved_execution="$(curl --fail --silent \
+  -H "Authorization: Bearer ${manager_token}" \
+  "http://127.0.0.1:8000/api/mcp/executions/${execution_id}")"
+approved_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$approved_execution")"
+delivery_mode="$(python -c "import json,sys; print(json.load(sys.stdin)['result'].get('delivery_mode',''))" <<<"$approved_execution")"
+if [[ "$approved_status" != "completed" || "$delivery_mode" != "simulated" ]]; then
+  echo "Security MCP approval did not resume the exact simulated email execution." >&2
+  exit 1
+fi
+
+echo "Backend API, Postgres, Redis worker, RAG, and Security MCP smoke tests passed."
 wait_http "http://127.0.0.1:5173" "Frontend preview"
 echo "Docker stack verification passed."
 echo "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

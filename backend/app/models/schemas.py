@@ -98,6 +98,9 @@ class ApprovalRecord(BaseModel):
     status: Literal["pending", "approved", "rejected"]
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    execution_id: str | None = None
+    arguments_hash: str | None = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -114,14 +117,59 @@ class AuditEvent(BaseModel):
 
 class MCPToolCallRequest(BaseModel):
     tool_name: str
-    scope: str
+    scope: str | None = None
     arguments: dict[str, object] = Field(default_factory=dict)
 
 
 class MCPToolCallResponse(BaseModel):
-    status: Literal["allowed", "approval_required", "blocked"]
+    status: Literal[
+        "allowed",
+        "completed",
+        "approval_required",
+        "blocked",
+        "rejected",
+        "failed",
+    ]
     message: str
     approval_id: str | None = None
+    execution_id: str | None = None
+    result: dict[str, object] = Field(default_factory=dict)
+
+
+class MCPExecutionRequest(BaseModel):
+    tool_name: str
+    arguments: dict[str, object] = Field(default_factory=dict)
+
+
+class MCPToolDefinition(BaseModel):
+    name: str
+    description: str
+    required_scope: str
+    approval_required: bool
+    side_effect: bool
+    input_schema: dict[str, object]
+
+
+class MCPExecutionRecord(BaseModel):
+    execution_id: str
+    tool_name: str
+    requested_by: str
+    required_scope: str
+    arguments: dict[str, object]
+    arguments_hash: str
+    status: Literal[
+        "running",
+        "pending_approval",
+        "completed",
+        "blocked",
+        "rejected",
+        "failed",
+    ]
+    approval_id: str | None = None
+    result: dict[str, object] = Field(default_factory=dict)
+    error: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class PromptScanResult(BaseModel):
