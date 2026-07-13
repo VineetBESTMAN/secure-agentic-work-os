@@ -161,6 +161,18 @@ class MCPGatewayService:
         require_scope(user.scopes, tool.required_scope)
         arguments = self._validate_arguments(tool, request.arguments)
         arguments_hash = self._hash_arguments(arguments)
+        if request.idempotency_key:
+            existing = self.get_by_idempotency_key(request.idempotency_key)
+            if existing is not None:
+                if (
+                    existing.tool_name != tool.name
+                    or existing.requested_by != user.user_id
+                    or existing.arguments_hash != arguments_hash
+                ):
+                    raise ValueError(
+                        "The idempotency key is already bound to a different tool request."
+                    )
+                return existing
         execution_id = f"mcp_{uuid4().hex}"
 
         unsafe_reasons = self._unsafe_reasons(arguments)
@@ -171,6 +183,7 @@ class MCPGatewayService:
                 user=user,
                 arguments=arguments,
                 arguments_hash=arguments_hash,
+                idempotency_key=request.idempotency_key,
                 execution_status="blocked",
                 error="Prompt safety policy blocked: " + ", ".join(unsafe_reasons),
             )
@@ -184,6 +197,7 @@ class MCPGatewayService:
                 user=user,
                 arguments=arguments,
                 arguments_hash=arguments_hash,
+                idempotency_key=request.idempotency_key,
                 execution_status="pending_approval",
             )
             approval = approval_service.create(
@@ -206,6 +220,7 @@ class MCPGatewayService:
             user=user,
             arguments=arguments,
             arguments_hash=arguments_hash,
+            idempotency_key=request.idempotency_key,
             execution_status="running",
         )
         return self._run(execution, tool, user)
@@ -248,8 +263,70 @@ class MCPGatewayService:
             self._audit(execution, "mcp.execution_failed")
             return execution
 
+        if tool.required_scope not in user.scopes:
+            execution = self._update_execution(
+                execution.execution_id,
+                status="blocked",
+                error=f"Requesting user no longer has scope: {tool.required_scope}",
+            )
+            self._audit(execution, "mcp.execution_scope_blocked")
+            return execution
+
+        unsafe_reasons = self._unsafe_reasons(execution.arguments)
+        if unsafe_reasons and policy_service.unsafe_content_blocks_tools(True):
+            execution = self._update_execution(
+                execution.execution_id,
+                status="blocked",
+                error="Prompt safety policy blocked: " + ", ".join(unsafe_reasons),
+            )
+            self._audit(execution, "mcp.execution_blocked")
+            return execution
+
         self._update_execution(execution.execution_id, status="running")
         return self._run(execution, tool, user)
+
+    def retry_execution(
+        self, execution_id: str, user: UserContext
+    ) -> MCPExecutionRecord:
+        execution = self.get_execution(execution_id)
+        if execution is None:
+            raise ValueError("MCP execution not found.")
+        if execution.requested_by != user.user_id:
+            raise PermissionError("Only the original requester can retry this execution.")
+        if execution.status != "failed":
+            raise ValueError("Only failed MCP executions can be retried.")
+
+        tool = self._get_tool(execution.tool_name)
+        require_scope(user.scopes, tool.required_scope)
+        if self._hash_arguments(execution.arguments) != execution.arguments_hash:
+            blocked = self._update_execution(
+                execution.execution_id,
+                status="blocked",
+                error="Stored tool arguments changed before retry.",
+            )
+            self._audit(blocked, "mcp.execution_tamper_blocked")
+            return blocked
+
+        self._update_execution(execution.execution_id, status="running")
+        return self._run(execution, tool, user)
+
+    def cancel_execution(
+        self, execution_id: str, user: UserContext
+    ) -> MCPExecutionRecord:
+        execution = self.get_execution(execution_id)
+        if execution is None:
+            raise ValueError("MCP execution not found.")
+        if execution.requested_by != user.user_id and user.role not in {"admin", "manager"}:
+            raise PermissionError("You cannot cancel this MCP execution.")
+        if execution.status != "pending_approval":
+            return execution
+        cancelled = self._update_execution(
+            execution.execution_id,
+            status="rejected",
+            error="Execution was cancelled with its parent workflow.",
+        )
+        self._audit(cancelled, "mcp.execution_cancelled")
+        return cancelled
 
     def list_executions(self, user: UserContext) -> list[MCPExecutionRecord]:
         where_clause = "" if user.role in {"admin", "manager"} else "WHERE requested_by = ?"
@@ -271,6 +348,14 @@ class MCPGatewayService:
             row = connection.execute(
                 "SELECT * FROM mcp_tool_executions WHERE execution_id = ?",
                 (execution_id,),
+            ).fetchone()
+        return self._row_to_execution(row) if row is not None else None
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> MCPExecutionRecord | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_tool_executions WHERE idempotency_key = ?",
+                (idempotency_key,),
             ).fetchone()
         return self._row_to_execution(row) if row is not None else None
 
@@ -308,6 +393,7 @@ class MCPGatewayService:
         user: UserContext,
         arguments: dict[str, object],
         arguments_hash: str,
+        idempotency_key: str | None,
         execution_status: str,
         error: str | None = None,
     ) -> MCPExecutionRecord:
@@ -316,9 +402,10 @@ class MCPGatewayService:
                 """
                 INSERT INTO mcp_tool_executions (
                     execution_id, tool_name, requested_by, required_scope,
-                    arguments_json, arguments_hash, status, result_json, error
+                    arguments_json, arguments_hash, idempotency_key,
+                    status, result_json, error
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     execution_id,
@@ -327,6 +414,7 @@ class MCPGatewayService:
                     tool.required_scope,
                     encode_json(arguments),
                     arguments_hash,
+                    idempotency_key,
                     execution_status,
                     encode_json({}),
                     error,
@@ -424,6 +512,7 @@ class MCPGatewayService:
             required_scope=row["required_scope"],
             arguments=decode_json(row["arguments_json"], {}),
             arguments_hash=row["arguments_hash"],
+            idempotency_key=row["idempotency_key"],
             status=row["status"],
             approval_id=row["approval_id"],
             result=decode_json(row["result_json"], {}),

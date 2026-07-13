@@ -32,7 +32,7 @@ This repository is designed to demonstrate the engineering patterns companies wa
 - Unsafe document review for prompt-injection flagged uploads
 - Policy engine with default document-access, tool-approval, and prompt-safety rules
 - Redis/RQ background workers for document ingestion, reindexing, and connector imports
-- Persisted agent workflow plans for approval-backed automation
+- Resumable workflow state machine with persisted actions, retries, cancellation, and idempotent MCP execution
 - CI and Docker scaffolding for production-oriented validation
 - Approval workflow service for high-risk actions
 - Authenticated MCP Streamable HTTP server with server-owned scopes and structured tools
@@ -113,7 +113,7 @@ This starter treats security as a first-class product feature:
 5. Review the cited passages, document library, source chunks, approvals, connector status, and audit trail.
 6. Use document actions to view chunks, edit metadata, re-index, or delete documents.
 7. Import a Google Drive-style note from the connector panel and watch the job list.
-8. Create an agent workflow and review the planned actions plus approval state.
+8. Create an agent workflow and watch safe actions execute until the email action pauses for approval.
 9. Use the Security MCP Console to run document search or create a persistent task.
 
 ## Security MCP server
@@ -140,6 +140,19 @@ To test the complete approval lifecycle in the UI:
 3. Sign out, then sign in as `manager@demo.local` with `demo-password`.
 4. Approve the pending action in the Approvals panel.
 5. Confirm that the execution changes to `completed` with `delivery_mode: simulated`; no external email is sent.
+
+## Agent workflow state machine
+
+Agent workflows now materialize each planned action as a durable database record. Document search and task creation execute through the Security MCP gateway, while email pauses in `waiting_for_approval`. A manager decision updates the exact hash-bound MCP execution and automatically resumes the parent workflow.
+
+The Agent Workflows panel shows live progress, action attempts, approval IDs, MCP execution IDs, results, and failures. A workflow can be resumed safely while waiting, retried up to three times after a failure, or cancelled. Stable idempotency keys ensure that repeated resume or retry requests reuse the original execution instead of creating duplicate tasks or deliveries.
+
+To test the complete workflow lifecycle:
+
+1. Sign in as `admin@demo.local` and create a workflow containing “create a task and send a reply.”
+2. Confirm document search and task creation are `completed`, while email is `waiting for approval`.
+3. Sign in as `manager@demo.local` and approve the workflow email in the Approvals panel.
+4. Confirm the workflow automatically becomes `completed` and the email result remains `simulated`.
 
 Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
 
@@ -298,12 +311,12 @@ powershell -ExecutionPolicy Bypass -File scripts/verify_docker_stack.ps1
 bash scripts/verify_docker_stack.sh
 ```
 
-The verification scripts build the stack, verify the database is at the latest Alembic head, sign in with the demo admin user, import a sample connector note through Redis/RQ, query PostgreSQL/pgvector for a cited answer, and confirm the frontend is reachable.
+The verification scripts build the stack, verify the database is at the latest Alembic head, sign in with the demo admin user, import a sample connector note through Redis/RQ, query PostgreSQL/pgvector for a cited answer, execute the Security MCP lifecycle, complete an approval-resumed agent workflow, and confirm the frontend is reachable.
 
 ## Suggested next steps
 
 1. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
-2. Add state-machine execution behind the persisted workflow records.
-3. Add organization-aware identity, permissions, and tenant isolation.
-4. Replace simulated MCP side effects with provider-backed delivery adapters.
-5. Add more real connectors after Google Drive, such as Gmail and Calendar imports.
+2. Add organization-aware identity, permissions, and tenant isolation.
+3. Replace simulated MCP side effects with provider-backed delivery adapters.
+4. Add more real connectors after Google Drive, such as Gmail and Calendar imports.
+5. Add workflow schedules, event triggers, and long-running timeout policies.
