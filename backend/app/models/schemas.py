@@ -336,3 +336,80 @@ class AgentWorkflowRecord(BaseModel):
     started_at: str | None = None
     completed_at: str | None = None
     cancelled_at: str | None = None
+
+
+class RuntimeObservation(BaseModel):
+    observation_id: str
+    trace_id: str
+    operation_type: Literal["embedding", "rag_query", "mcp_tool"]
+    actor_id: str
+    provider: str
+    model: str
+    status: Literal["completed", "failed", "blocked", "rejected", "cancelled"]
+    latency_ms: float = Field(ge=0)
+    input_units: int = Field(default=0, ge=0)
+    output_units: int = Field(default=0, ge=0)
+    estimated_cost_usd: float = Field(default=0, ge=0)
+    metadata: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ObservationBreakdown(BaseModel):
+    operation_type: str
+    provider: str
+    model: str
+    operations: int
+    completed: int
+    failed_or_blocked: int
+    average_latency_ms: float
+    estimated_cost_usd: float
+
+
+class CostBudgetCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    period: Literal["daily", "monthly"] = "daily"
+    limit_usd: float = Field(gt=0, le=1_000_000)
+    warning_percent: int = Field(default=80, ge=1, le=100)
+    enabled: bool = True
+
+
+class CostBudgetUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    period: Literal["daily", "monthly"] | None = None
+    limit_usd: float | None = Field(default=None, gt=0, le=1_000_000)
+    warning_percent: int | None = Field(default=None, ge=1, le=100)
+    enabled: bool | None = None
+
+
+class CostBudgetRecord(BaseModel):
+    budget_id: str
+    name: str
+    period: Literal["daily", "monthly"]
+    limit_usd: float
+    warning_percent: int
+    enabled: bool
+    created_by: str
+    spent_usd: float
+    remaining_usd: float
+    utilization_percent: float
+    state: Literal["ok", "warning", "exceeded"]
+    period_start: datetime
+    period_end: datetime
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class RuntimeSummary(BaseModel):
+    window_hours: int
+    total_operations: int
+    completed_operations: int
+    failed_operations: int
+    blocked_operations: int
+    success_rate: float
+    average_latency_ms: float
+    p95_latency_ms: float
+    input_units: int
+    output_units: int
+    estimated_cost_usd: float
+    breakdown: list[ObservationBreakdown] = Field(default_factory=list)
+    budgets: list[CostBudgetRecord] = Field(default_factory=list)

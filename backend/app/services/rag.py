@@ -1,4 +1,6 @@
+import math
 import re
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -24,6 +26,7 @@ from app.models.schemas import (
     RagAnswer,
 )
 from app.services.embeddings import embedding_service
+from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
 
@@ -372,27 +375,67 @@ class RagService:
             classification=document.classification,
         )
 
-    def answer(self, question: str, role: str) -> RagAnswer:
-        query_embedding = embedding_service.embed(question)
-        if not any(query_embedding):
-            return RagAnswer(answer="Ask a more specific question.", citations=[])
+    def answer(self, question: str, role: str, actor_id: str = "system") -> RagAnswer:
+        started = time.perf_counter()
+        with observability_service.context(
+            actor_id, trace_id=observability_service.current_trace_id
+        ) as trace_id:
+            try:
+                query_embedding = embedding_service.embed(question)
+                if not any(query_embedding):
+                    answer = RagAnswer(answer="Ask a more specific question.", citations=[])
+                else:
+                    top_matches = self._vector_matches(
+                        query_embedding=query_embedding, role=role
+                    )
+                    if not top_matches:
+                        answer = RagAnswer(
+                            answer=(
+                                "I could not find a relevant passage in your accessible "
+                                "documents."
+                            ),
+                            citations=[],
+                        )
+                    else:
+                        citations = [
+                            self._match_to_citation(score=score, row=row)
+                            for score, row in top_matches
+                        ]
+                        source_names = ", ".join(
+                            dict.fromkeys(citation.title for citation in citations)
+                        )
+                        answer = RagAnswer(
+                            answer=(
+                                "Based on the retrieved passages, the strongest sources "
+                                f"are: {source_names}."
+                            ),
+                            citations=citations,
+                        )
+            except Exception as exc:
+                observability_service.record_safely(
+                    operation_type="rag_query",
+                    provider="retrieval",
+                    model="semantic-search",
+                    status="failed",
+                    latency_ms=(time.perf_counter() - started) * 1_000,
+                    input_units=max(1, math.ceil(len(question) / 4)),
+                    metadata={"role": role, "error": str(exc)},
+                    trace_id=trace_id,
+                )
+                raise
 
-        top_matches = self._vector_matches(query_embedding=query_embedding, role=role)
-        if not top_matches:
-            return RagAnswer(
-                answer="I could not find a relevant passage in your accessible documents.",
-                citations=[],
+            observability_service.record_safely(
+                operation_type="rag_query",
+                provider="retrieval",
+                model="semantic-search",
+                status="completed",
+                latency_ms=(time.perf_counter() - started) * 1_000,
+                input_units=max(1, math.ceil(len(question) / 4)),
+                output_units=len(answer.citations),
+                metadata={"role": role, "citation_count": len(answer.citations)},
+                trace_id=trace_id,
             )
-
-        citations = [
-            self._match_to_citation(score=score, row=row)
-            for score, row in top_matches
-        ]
-        source_names = ", ".join(dict.fromkeys(citation.title for citation in citations))
-        return RagAnswer(
-            answer=f"Based on the retrieved passages, the strongest sources are: {source_names}.",
-            citations=citations,
-        )
+            return answer
 
     def _insert_chunks(self, connection, document_id: str, chunks: list[str]) -> None:
         embeddings = embedding_service.embed_many(chunks)

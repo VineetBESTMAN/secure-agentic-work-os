@@ -1,8 +1,10 @@
 import hashlib
 import math
 import re
+import time
 
 from app.core.config import Settings, get_settings
+from app.services.observability import BudgetExceededError, observability_service
 
 try:
     from openai import OpenAI
@@ -23,11 +25,62 @@ class EmbeddingService:
             return []
 
         provider = settings.embedding_provider.lower().strip()
-        if provider == "local":
-            return [self._local_embed(text, dimensions=settings.vector_dimensions) for text in texts]
-        if provider == "openai":
-            return self._openai_embed_many(texts=texts, settings=settings)
-        raise ValueError("APP_EMBEDDING_PROVIDER must be 'local' or 'openai'.")
+        model = (
+            settings.openai_embedding_model
+            if provider == "openai"
+            else f"local-hash-{settings.vector_dimensions}d"
+        )
+        input_units = sum(self._estimate_tokens(text) for text in texts)
+        estimated_cost = (
+            input_units * settings.openai_embedding_cost_per_million_tokens / 1_000_000
+            if provider == "openai"
+            else 0.0
+        )
+        started = time.perf_counter()
+        try:
+            observability_service.assert_budget_available(estimated_cost)
+            if provider == "local":
+                vectors = [
+                    self._local_embed(text, dimensions=settings.vector_dimensions)
+                    for text in texts
+                ]
+            elif provider == "openai":
+                vectors = self._openai_embed_many(texts=texts, settings=settings)
+            else:
+                raise ValueError("APP_EMBEDDING_PROVIDER must be 'local' or 'openai'.")
+        except Exception as exc:
+            observability_service.record_safely(
+                operation_type="embedding",
+                provider=provider,
+                model=model,
+                status="blocked" if isinstance(exc, BudgetExceededError) else "failed",
+                latency_ms=(time.perf_counter() - started) * 1_000,
+                input_units=input_units,
+                estimated_cost_usd=0.0,
+                metadata={
+                    "batch_size": len(texts),
+                    "error": str(exc),
+                    "unit_estimation": "characters_divided_by_4",
+                },
+            )
+            raise
+
+        observability_service.record_safely(
+            operation_type="embedding",
+            provider=provider,
+            model=model,
+            status="completed",
+            latency_ms=(time.perf_counter() - started) * 1_000,
+            input_units=input_units,
+            output_units=len(vectors) * settings.vector_dimensions,
+            estimated_cost_usd=estimated_cost,
+            metadata={
+                "batch_size": len(texts),
+                "dimensions": settings.vector_dimensions,
+                "unit_estimation": "characters_divided_by_4",
+            },
+        )
+        return vectors
 
     def _local_embed(self, text: str, dimensions: int) -> list[float]:
         vector = [0.0] * dimensions
@@ -78,6 +131,10 @@ class EmbeddingService:
     def _normalize_input(self, text: str) -> str:
         cleaned = text.replace("\n", " ").strip()
         return cleaned or " "
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, math.ceil(len(text) / 4))
 
     def cosine_similarity(self, left: list[float], right: list[float]) -> float:
         if not left or not right:

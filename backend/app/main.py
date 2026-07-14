@@ -3,11 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import agent, approvals, audit, auth, connectors, documents, health, jobs, mcp, policies
+from app.api.routes import agent, approvals, audit, auth, connectors, documents, health, jobs, mcp, observability, policies
 from app.core.config import get_settings
 from app.core.migrations import upgrade_database
 from app.services.approval import approval_service
 from app.services.mcp_protocol import security_mcp, security_mcp_http_app
+from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.users import user_service
 from app.services.workflows import workflow_service
@@ -18,6 +19,7 @@ if settings.run_migrations_on_startup:
 user_service.seed_demo_users()
 approval_service.seed_demo_request()
 policy_service.seed_defaults()
+observability_service.seed_defaults(settings.default_daily_cost_limit_usd)
 workflow_service.backfill_legacy_actions()
 
 
@@ -52,4 +54,5 @@ app.include_router(mcp.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(policies.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
+app.include_router(observability.router, prefix="/api")
 app.mount("/protocol", security_mcp_http_app)

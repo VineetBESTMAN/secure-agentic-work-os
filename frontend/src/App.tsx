@@ -1,9 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
+  Activity,
   Bot,
   CheckCircle2,
   ClipboardList,
   Database,
+  DollarSign,
   Eye,
   FileUp,
   Plug,
@@ -189,6 +191,44 @@ type MCPExecutionRecord = {
   created_at: string | null;
 };
 
+type RuntimeSummary = {
+  window_hours: number;
+  total_operations: number;
+  completed_operations: number;
+  failed_operations: number;
+  blocked_operations: number;
+  success_rate: number;
+  average_latency_ms: number;
+  p95_latency_ms: number;
+  input_units: number;
+  output_units: number;
+  estimated_cost_usd: number;
+  breakdown: {
+    operation_type: string;
+    provider: string;
+    model: string;
+    operations: number;
+    completed: number;
+    failed_or_blocked: number;
+    average_latency_ms: number;
+    estimated_cost_usd: number;
+  }[];
+  budgets: {
+    budget_id: string;
+    name: string;
+    period: "daily" | "monthly";
+    limit_usd: number;
+    warning_percent: number;
+    enabled: boolean;
+    spent_usd: number;
+    remaining_usd: number;
+    utilization_percent: number;
+    state: "ok" | "warning" | "exceeded";
+    period_start: string;
+    period_end: string;
+  }[];
+};
+
 const MCP_ARGUMENT_TEMPLATES: Record<string, Record<string, unknown>> = {
   search_documents: { question: "What requires manager approval?" },
   create_task: {
@@ -229,6 +269,7 @@ export default function App() {
   const [workflows, setWorkflows] = useState<AgentWorkflowRecord[]>([]);
   const [mcpTools, setMcpTools] = useState<MCPToolDefinition[]>([]);
   const [mcpExecutions, setMcpExecutions] = useState<MCPExecutionRecord[]>([]);
+  const [runtimeSummary, setRuntimeSummary] = useState<RuntimeSummary | null>(null);
   const [selectedMcpTool, setSelectedMcpTool] = useState("search_documents");
   const [mcpArguments, setMcpArguments] = useState(
     JSON.stringify(MCP_ARGUMENT_TEMPLATES.search_documents, null, 2),
@@ -289,6 +330,7 @@ export default function App() {
       setUnsafeDocuments(await api<DocumentRecord[]>("/api/documents/unsafe"));
       setPolicies(await api<PolicyRecord[]>("/api/policies"));
       setJobs(await api<JobRecord[]>("/api/jobs"));
+      setRuntimeSummary(await api<RuntimeSummary>("/api/observability/summary?hours=24"));
     }
   }
 
@@ -879,6 +921,97 @@ export default function App() {
             )}
           </div>
         </section>
+
+        {runtimeSummary && (
+          <section className="panel observability-console">
+            <div className="panel-title console-heading">
+              <div>
+                <Activity size={20} />
+                <div>
+                  <h2>Runtime Governance</h2>
+                  <small>Persistent cost, latency, reliability, and budget telemetry</small>
+                </div>
+              </div>
+              <span className="protocol-badge">Last {runtimeSummary.window_hours}h</span>
+            </div>
+
+            <div className="metric-grid">
+              <article className="metric-card">
+                <small>Operations</small>
+                <strong>{runtimeSummary.total_operations}</strong>
+                <span>{runtimeSummary.success_rate.toFixed(1)}% completed</span>
+              </article>
+              <article className="metric-card">
+                <small>Average latency</small>
+                <strong>{runtimeSummary.average_latency_ms.toFixed(1)} ms</strong>
+                <span>P95 {runtimeSummary.p95_latency_ms.toFixed(1)} ms</span>
+              </article>
+              <article className="metric-card">
+                <small>Governance outcomes</small>
+                <strong>{runtimeSummary.blocked_operations} blocked</strong>
+                <span>{runtimeSummary.failed_operations} failed</span>
+              </article>
+              <article className="metric-card">
+                <small>Estimated provider cost</small>
+                <strong>${runtimeSummary.estimated_cost_usd.toFixed(6)}</strong>
+                <span>{runtimeSummary.input_units.toLocaleString()} input units</span>
+              </article>
+            </div>
+
+            <div className="governance-grid">
+              <div className="stack">
+                <div className="panel-title">
+                  <DollarSign size={17} />
+                  <h2>Cost Budgets</h2>
+                </div>
+                {runtimeSummary.budgets.map((budget) => (
+                  <article key={budget.budget_id} className="budget-card">
+                    <div>
+                      <strong>{budget.name}</strong>
+                      <span className={`status-pill budget-${budget.state}`}>
+                        {budget.enabled ? budget.state : "disabled"}
+                      </span>
+                    </div>
+                    <progress
+                      value={Math.min(budget.utilization_percent, 100)}
+                      max={100}
+                    />
+                    <small>
+                      ${budget.spent_usd.toFixed(6)} of ${budget.limit_usd.toFixed(2)} {budget.period}
+                    </small>
+                  </article>
+                ))}
+                {runtimeSummary.budgets.length === 0 && (
+                  <p className="empty">No cost budgets configured.</p>
+                )}
+              </div>
+
+              <div className="stack">
+                <div className="panel-title">
+                  <Activity size={17} />
+                  <h2>Operation Breakdown</h2>
+                </div>
+                <div className="item-list compact telemetry-list">
+                  {runtimeSummary.breakdown.map((item) => (
+                    <article
+                      key={`${item.operation_type}-${item.provider}-${item.model}`}
+                      className="item"
+                    >
+                      <strong>{item.operation_type.replaceAll("_", " ")}</strong>
+                      <span>{item.provider} / {item.model}</span>
+                      <small>
+                        {item.operations} runs | {item.average_latency_ms.toFixed(1)} ms avg | ${item.estimated_cost_usd.toFixed(6)}
+                      </small>
+                    </article>
+                  ))}
+                  {runtimeSummary.breakdown.length === 0 && (
+                    <p className="empty">Run a query or MCP tool to populate telemetry.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
 
         <section className="columns">
           <section className="panel">

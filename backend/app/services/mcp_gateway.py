@@ -1,6 +1,8 @@
 import hashlib
 import json
+import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, Literal
 from uuid import uuid4
@@ -20,6 +22,7 @@ from app.models.schemas import (
 )
 from app.services.approval import approval_service
 from app.services.audit import audit_service
+from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
 from app.services.rag import rag_service
@@ -188,6 +191,7 @@ class MCPGatewayService:
                 error="Prompt safety policy blocked: " + ", ".join(unsafe_reasons),
             )
             self._audit(execution, "mcp.execution_blocked")
+            self._observe_execution(execution)
             return execution
 
         if self._requires_approval(tool):
@@ -235,6 +239,7 @@ class MCPGatewayService:
         if approval.status == "rejected":
             execution = self._update_execution(execution.execution_id, status="rejected")
             self._audit(execution, "mcp.execution_rejected")
+            self._observe_execution(execution)
             return execution
         if approval.status != "approved" or execution.status != "pending_approval":
             return execution
@@ -250,6 +255,7 @@ class MCPGatewayService:
                 error="Stored tool arguments no longer match the approved payload hash.",
             )
             self._audit(execution, "mcp.execution_tamper_blocked")
+            self._observe_execution(execution)
             return execution
 
         tool = self._get_tool(execution.tool_name)
@@ -261,6 +267,7 @@ class MCPGatewayService:
                 error="The requesting user no longer exists.",
             )
             self._audit(execution, "mcp.execution_failed")
+            self._observe_execution(execution)
             return execution
 
         if tool.required_scope not in user.scopes:
@@ -270,6 +277,7 @@ class MCPGatewayService:
                 error=f"Requesting user no longer has scope: {tool.required_scope}",
             )
             self._audit(execution, "mcp.execution_scope_blocked")
+            self._observe_execution(execution)
             return execution
 
         unsafe_reasons = self._unsafe_reasons(execution.arguments)
@@ -280,6 +288,7 @@ class MCPGatewayService:
                 error="Prompt safety policy blocked: " + ", ".join(unsafe_reasons),
             )
             self._audit(execution, "mcp.execution_blocked")
+            self._observe_execution(execution)
             return execution
 
         self._update_execution(execution.execution_id, status="running")
@@ -305,6 +314,7 @@ class MCPGatewayService:
                 error="Stored tool arguments changed before retry.",
             )
             self._audit(blocked, "mcp.execution_tamper_blocked")
+            self._observe_execution(blocked)
             return blocked
 
         self._update_execution(execution.execution_id, status="running")
@@ -326,6 +336,7 @@ class MCPGatewayService:
             error="Execution was cancelled with its parent workflow.",
         )
         self._audit(cancelled, "mcp.execution_cancelled")
+        self._observe_execution(cancelled, status="cancelled")
         return cancelled
 
     def list_executions(self, user: UserContext) -> list[MCPExecutionRecord]:
@@ -365,25 +376,35 @@ class MCPGatewayService:
     def _run(
         self, execution: MCPExecutionRecord, tool: SecureTool, user: UserContext
     ) -> MCPExecutionRecord:
-        try:
-            arguments = tool.arguments_model.model_validate(execution.arguments)
-            result = tool.handler(arguments, user, execution.execution_id)
-            completed = self._update_execution(
-                execution.execution_id,
-                status="completed",
-                result=result,
-                error=None,
-            )
-            self._audit(completed, "mcp.execution_completed")
-            return completed
-        except Exception as exc:
-            failed = self._update_execution(
-                execution.execution_id,
-                status="failed",
-                error=str(exc),
-            )
-            self._audit(failed, "mcp.execution_failed")
-            return failed
+        started = time.perf_counter()
+        with observability_service.context(user.user_id):
+            try:
+                arguments = tool.arguments_model.model_validate(execution.arguments)
+                result = tool.handler(arguments, user, execution.execution_id)
+                completed = self._update_execution(
+                    execution.execution_id,
+                    status="completed",
+                    result=result,
+                    error=None,
+                )
+                self._audit(completed, "mcp.execution_completed")
+                self._observe_execution(
+                    completed,
+                    latency_ms=(time.perf_counter() - started) * 1_000,
+                )
+                return completed
+            except Exception as exc:
+                failed = self._update_execution(
+                    execution.execution_id,
+                    status="failed",
+                    error=str(exc),
+                )
+                self._audit(failed, "mcp.execution_failed")
+                self._observe_execution(
+                    failed,
+                    latency_ms=(time.perf_counter() - started) * 1_000,
+                )
+                return failed
 
     def _insert_execution(
         self,
@@ -540,8 +561,39 @@ class MCPGatewayService:
         arguments: BaseModel, user: UserContext, execution_id: str
     ) -> dict[str, object]:
         payload = SearchDocumentsArguments.model_validate(arguments)
-        answer = rag_service.answer(question=payload.question, role=user.role)
+        answer = rag_service.answer(
+            question=payload.question,
+            role=user.role,
+            actor_id=user.user_id,
+        )
         return answer.model_dump(mode="json")
+
+    @staticmethod
+    def _observe_execution(
+        execution: MCPExecutionRecord,
+        *,
+        latency_ms: float = 0.0,
+        status: str | None = None,
+    ) -> None:
+        arguments_size = len(
+            json.dumps(execution.arguments, ensure_ascii=True, sort_keys=True)
+        )
+        observability_service.record_safely(
+            operation_type="mcp_tool",
+            provider="secure-mcp",
+            model=execution.tool_name,
+            status=status or execution.status,
+            latency_ms=latency_ms,
+            input_units=max(1, math.ceil(arguments_size / 4)),
+            output_units=len(execution.result),
+            actor_id=execution.requested_by,
+            metadata={
+                "execution_id": execution.execution_id,
+                "approval_id": execution.approval_id or "",
+                "required_scope": execution.required_scope,
+                "error": execution.error or "",
+            },
+        )
 
     @staticmethod
     def _create_task(

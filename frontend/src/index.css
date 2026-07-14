@@ -162,6 +162,84 @@ h2 {
     linear-gradient(145deg, #ffffff 0%, #f4faf9 100%);
 }
 
+.observability-console {
+  border-color: #a9bdd0;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(56, 103, 147, 0.13), transparent 34%),
+    linear-gradient(145deg, #ffffff 0%, #f6f9fc 100%);
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #d4e0e9;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.84);
+  padding: 12px;
+}
+
+.metric-card strong {
+  color: #234e70;
+  font-size: 1.28rem;
+}
+
+.metric-card span {
+  color: #5c6e7d;
+  font-size: 0.78rem;
+}
+
+.governance-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(360px, 1.2fr);
+  gap: 16px;
+}
+
+.budget-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #d4e0e9;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 11px;
+}
+
+.budget-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.budget-card progress {
+  width: 100%;
+  accent-color: #38719c;
+}
+
+.budget-warning {
+  background: #fff1ce;
+  color: #795911;
+}
+
+.budget-exceeded {
+  background: #f9e2dc;
+  color: #923f2e;
+}
+
+.budget-ok {
+  background: #dcefe5;
+  color: #276342;
+}
+
+.telemetry-list {
+  max-height: 260px;
+}
+
 .console-heading {
   justify-content: space-between;
 }
@@ -521,6 +599,8 @@ h2 {
 
   .panel-grid,
   .columns,
+  .metric-grid,
+  .governance-grid,
   .mcp-runner,
   .split,
   .split.three {
