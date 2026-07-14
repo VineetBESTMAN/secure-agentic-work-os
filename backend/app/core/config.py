@@ -67,6 +67,14 @@ class Settings(BaseSettings):
         default=20.0,
         validation_alias="OPENAI_EMBEDDING_TIMEOUT_SECONDS",
     )
+    openai_embedding_cost_per_million_tokens: float = Field(
+        default=0.0,
+        validation_alias="OPENAI_EMBEDDING_COST_PER_MILLION_TOKENS",
+    )
+    default_daily_cost_limit_usd: float = Field(
+        default=5.0,
+        validation_alias="APP_DEFAULT_DAILY_COST_LIMIT_USD",
+    )
     oauth_redirect_base_url: str = Field(
         default="http://127.0.0.1:8000/api/connectors",
         validation_alias="APP_OAUTH_REDIRECT_BASE_URL",

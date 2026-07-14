@@ -110,7 +110,11 @@ def query_documents(
 ) -> RagAnswer:
     scan = prompt_guard_service.scan_text(payload.question)
     try:
-        answer = rag_service.answer(question=payload.question, role=user.role)
+        answer = rag_service.answer(
+            question=payload.question,
+            role=user.role,
+            actor_id=user.user_id,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

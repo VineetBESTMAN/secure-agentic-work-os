@@ -18,6 +18,8 @@ The application runs locally with Docker Compose and supports testing with real 
 - Approval records bound to immutable payload hashes with replay protection
 - Google Drive OAuth browsing and selected-file import into the document library
 - Policy evaluation, job monitoring, approvals, connector status, and audit visibility in the React UI
+- Persistent RAG, embedding, and MCP runtime telemetry with latency, reliability, and cost summaries
+- Daily or monthly cost budgets with warning thresholds and preflight enforcement for priced providers
 - Alembic migrations and automated Docker verification
 - GitHub Actions checks for backend tests, migration round trips, frontend builds, and dependency audits
 
@@ -36,6 +38,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Local deterministic embeddings or optional OpenAI embeddings
 - Security MCP server exposed through Streamable HTTP
 - OAuth connector framework with a working Google Drive file flow
+- Runtime observability ledger and configurable provider-cost budgets
 
 ### Data and infrastructure
 
@@ -183,6 +186,25 @@ APP_VECTOR_DIMENSIONS=384
 ```
 
 The configured OpenAI model receives a request for 384 output dimensions to match the pgvector schema. Re-index uploaded documents after changing the embedding provider or vector dimensions.
+
+## Runtime governance and cost budgets
+
+RAG queries, embedding batches, and terminal MCP tool executions write structured runtime observations with a shared trace ID, actor, provider/model label, outcome, latency, usage units, and estimated cost. Admins and managers can inspect 24-hour or custom-window summaries in the Runtime Governance dashboard or through:
+
+```text
+GET /api/observability/summary?hours=24
+GET /api/observability/events?hours=24&limit=200
+GET /api/observability/budgets
+```
+
+Admins can create, update, or remove daily and monthly budgets under `/api/observability/budgets`. Enabled budgets are checked before priced embedding requests. Provider prices change over time, so the repository deliberately does not hard-code a price; configure the current rate explicitly:
+
+```text
+OPENAI_EMBEDDING_COST_PER_MILLION_TOKENS=0
+APP_DEFAULT_DAILY_COST_LIMIT_USD=5
+```
+
+The deterministic local embedding provider records latency and usage with zero provider cost. Telemetry write failures never interrupt the governed operation, while an exceeded enabled budget blocks the priced request before it reaches the provider.
 
 ## Google Drive OAuth
 
