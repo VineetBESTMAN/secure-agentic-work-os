@@ -6,9 +6,9 @@ class AgentService:
         normalized = prompt.lower()
         actions = [
             ActionProposal(
-                action_id="act_search_email",
-                action_type="search_email",
-                description="Search recent emails for urgent or client-related messages.",
+                action_id="act_search_documents",
+                action_type="search_documents",
+                description="Search workspace knowledge for urgent or client-related work.",
                 requires_approval=False,
                 scope="documents:read",
             ),
@@ -16,7 +16,7 @@ class AgentService:
                 action_id="act_create_task",
                 action_type="create_task",
                 description="Create follow-up tasks from the relevant messages.",
-                requires_approval="tasks:write" not in user.scopes,
+                requires_approval=False,
                 scope="tasks:write",
             ),
         ]

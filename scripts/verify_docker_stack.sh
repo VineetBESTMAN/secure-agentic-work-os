@@ -122,7 +122,37 @@ if [[ "$approved_status" != "completed" || "$delivery_mode" != "simulated" ]]; t
   exit 1
 fi
 
-echo "Backend API, Postgres, Redis worker, RAG, and Security MCP smoke tests passed."
+workflow="$(curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${token}" \
+  -d '{"prompt":"Find the Acme renewal policy, create a verification task, and send a reply"}' \
+  http://127.0.0.1:8000/api/agent/workflows)"
+workflow_id="$(python -c "import json,sys; print(json.load(sys.stdin)['workflow_id'])" <<<"$workflow")"
+workflow_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$workflow")"
+workflow_approval_id="$(python -c "import json,sys; print(next((a.get('approval_id','') for a in json.load(sys.stdin)['actions'] if a['status'] == 'waiting_for_approval'), ''))" <<<"$workflow")"
+if [[ "$workflow_status" != "waiting_for_approval" || -z "$workflow_approval_id" ]]; then
+  echo "Agent workflow did not execute safe actions and pause for approval." >&2
+  exit 1
+fi
+
+curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${manager_token}" \
+  -d '{"approved":true}' \
+  "http://127.0.0.1:8000/api/approvals/${workflow_approval_id}/decision" >/dev/null
+
+completed_workflow="$(curl --fail --silent \
+  -H "Authorization: Bearer ${token}" \
+  "http://127.0.0.1:8000/api/agent/workflows/${workflow_id}")"
+completed_workflow_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$completed_workflow")"
+workflow_email_status="$(python -c "import json,sys; print(next(a['status'] for a in json.load(sys.stdin)['actions'] if a['tool_name'] == 'send_email'))" <<<"$completed_workflow")"
+workflow_delivery_mode="$(python -c "import json,sys; print(next(a['result'].get('delivery_mode','') for a in json.load(sys.stdin)['actions'] if a['tool_name'] == 'send_email'))" <<<"$completed_workflow")"
+if [[ "$completed_workflow_status" != "completed" || "$workflow_email_status" != "completed" || "$workflow_delivery_mode" != "simulated" ]]; then
+  echo "Approval did not resume and complete the agent workflow." >&2
+  exit 1
+fi
+
+echo "Backend API, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
 wait_http "http://127.0.0.1:5173" "Frontend preview"
 echo "Docker stack verification passed."
 echo "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

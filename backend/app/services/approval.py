@@ -119,6 +119,25 @@ class ApprovalService:
             return None
         return self._row_to_record(row)
 
+    def cancel_for_execution(
+        self, execution_id: str, cancelled_by: str
+    ) -> ApprovalRecord | None:
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                """
+                UPDATE approval_requests
+                SET status = 'rejected', reviewed_by = ?, reviewed_at = ?
+                WHERE execution_id = ? AND status = 'pending'
+                """,
+                (cancelled_by, reviewed_at, execution_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM approval_requests WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone()
+        return self._row_to_record(row) if row is not None else None
+
     def _row_to_record(self, row) -> ApprovalRecord:
         record = ApprovalRecord(
             approval_id=row["approval_id"],

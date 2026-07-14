@@ -76,7 +76,13 @@ class RagAnswer(BaseModel):
 
 class ActionProposal(BaseModel):
     action_id: str
-    action_type: Literal["search_email", "create_task", "draft_reply", "send_email"]
+    action_type: Literal[
+        "search_email",
+        "search_documents",
+        "create_task",
+        "draft_reply",
+        "send_email",
+    ]
     description: str
     requires_approval: bool
     scope: str
@@ -139,6 +145,7 @@ class MCPToolCallResponse(BaseModel):
 class MCPExecutionRequest(BaseModel):
     tool_name: str
     arguments: dict[str, object] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class MCPToolDefinition(BaseModel):
@@ -157,6 +164,7 @@ class MCPExecutionRecord(BaseModel):
     required_scope: str
     arguments: dict[str, object]
     arguments_hash: str
+    idempotency_key: str | None = None
     status: Literal[
         "running",
         "pending_approval",
@@ -273,11 +281,58 @@ class AgentWorkflowRequest(BaseModel):
     prompt: str
 
 
+class WorkflowActionRecord(BaseModel):
+    action_instance_id: str
+    workflow_id: str
+    sequence: int
+    action_type: str
+    tool_name: str
+    description: str
+    required_scope: str
+    requires_approval: bool
+    status: Literal[
+        "pending",
+        "running",
+        "waiting_for_approval",
+        "completed",
+        "blocked",
+        "failed",
+        "cancelled",
+        "skipped",
+    ]
+    attempt_count: int = 0
+    max_attempts: int = 3
+    idempotency_key: str
+    input: dict[str, object] = Field(default_factory=dict)
+    result: dict[str, object] = Field(default_factory=dict)
+    execution_id: str | None = None
+    approval_id: str | None = None
+    error: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    updated_at: str | None = None
+
+
 class AgentWorkflowRecord(BaseModel):
     workflow_id: str
     prompt: str
     requested_by: str
-    status: Literal["planned", "waiting_for_approval", "completed", "blocked"]
+    status: Literal[
+        "planned",
+        "running",
+        "waiting_for_approval",
+        "completed",
+        "blocked",
+        "failed",
+        "cancelled",
+    ]
     plan: AgentPlanResponse
+    actions: list[WorkflowActionRecord] = Field(default_factory=list)
+    current_action_index: int = 0
+    last_error: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    cancelled_at: str | None = None

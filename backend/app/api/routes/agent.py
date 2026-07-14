@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.security import get_current_user
 from app.models.schemas import AgentPlanRequest, AgentPlanResponse, AgentWorkflowRecord, AgentWorkflowRequest
@@ -42,4 +42,75 @@ def list_workflows(user=Depends(get_current_user)) -> list[AgentWorkflowRecord]:
         event_type="agent.workflow_list",
         detail={"role": user.role},
     )
-    return workflow_service.list_workflows()
+    return workflow_service.list_workflows(user)
+
+
+@router.get("/workflows/{workflow_id}", response_model=AgentWorkflowRecord)
+def get_workflow(
+    workflow_id: str, user=Depends(get_current_user)
+) -> AgentWorkflowRecord:
+    try:
+        workflow = workflow_service.get_workflow(workflow_id, user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    if workflow is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workflow not found",
+        )
+    return workflow
+
+
+@router.post("/workflows/{workflow_id}/resume", response_model=AgentWorkflowRecord)
+def resume_workflow(
+    workflow_id: str, user=Depends(get_current_user)
+) -> AgentWorkflowRecord:
+    return _run_workflow_command(workflow_id, "resume", user)
+
+
+@router.post("/workflows/{workflow_id}/retry", response_model=AgentWorkflowRecord)
+def retry_workflow(
+    workflow_id: str, user=Depends(get_current_user)
+) -> AgentWorkflowRecord:
+    return _run_workflow_command(workflow_id, "retry", user)
+
+
+@router.post("/workflows/{workflow_id}/cancel", response_model=AgentWorkflowRecord)
+def cancel_workflow(
+    workflow_id: str, user=Depends(get_current_user)
+) -> AgentWorkflowRecord:
+    return _run_workflow_command(workflow_id, "cancel", user)
+
+
+def _run_workflow_command(
+    workflow_id: str, command: str, user
+) -> AgentWorkflowRecord:
+    try:
+        if command == "retry":
+            workflow = workflow_service.retry_workflow(workflow_id, user)
+        elif command == "cancel":
+            workflow = workflow_service.cancel_workflow(workflow_id, user)
+        else:
+            workflow = workflow_service.run_workflow(workflow_id, user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if str(exc) == "Workflow not found."
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type=f"agent.workflow_{command}",
+        detail={"workflow_id": workflow_id, "status": workflow.status},
+    )
+    return workflow

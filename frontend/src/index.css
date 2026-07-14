@@ -279,6 +279,8 @@ h2 {
 }
 
 .status-pending_approval,
+.status-waiting_for_approval,
+.status-pending,
 .status-running {
   background: #fff1ce;
   color: #795911;
@@ -286,7 +288,8 @@ h2 {
 
 .status-blocked,
 .status-rejected,
-.status-failed {
+.status-failed,
+.status-cancelled {
   background: #f9e2dc;
   color: #923f2e;
 }
@@ -356,6 +359,111 @@ h2 {
 .item progress {
   accent-color: var(--accent);
   width: 100%;
+}
+
+.workflow-list {
+  max-height: 680px;
+}
+
+.workflow-card {
+  display: grid;
+  gap: 11px;
+  border: 1px solid #c9d8d8;
+  border-radius: 8px;
+  background: linear-gradient(150deg, #ffffff, #f7fbfa);
+  padding: 12px;
+}
+
+.workflow-card > progress {
+  width: 100%;
+  accent-color: #2f6f73;
+}
+
+.workflow-card > em,
+.workflow-action-body em {
+  color: #9b402d;
+  font-style: normal;
+}
+
+.workflow-heading,
+.workflow-action-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workflow-heading > div {
+  display: grid;
+  gap: 7px;
+}
+
+.workflow-timeline {
+  display: grid;
+  gap: 0;
+}
+
+.workflow-action {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  padding-bottom: 12px;
+}
+
+.workflow-action:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 24px;
+  bottom: 0;
+  left: 13px;
+  width: 2px;
+  background: #d7e2e1;
+}
+
+.workflow-marker {
+  z-index: 1;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 2px solid #b6c5ca;
+  border-radius: 50%;
+  background: #f2f5f6;
+  color: #53636c;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.workflow-marker.status-completed {
+  border-color: #6ea482;
+}
+
+.workflow-marker.status-waiting_for_approval,
+.workflow-marker.status-running {
+  border-color: #d0a748;
+}
+
+.workflow-marker.status-blocked,
+.workflow-marker.status-failed,
+.workflow-marker.status-cancelled {
+  border-color: #c77d69;
+}
+
+.workflow-action-body {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.74);
+  padding: 7px 9px;
+}
+
+.workflow-action-body code {
+  color: #2a5f63;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
 }
 
 .item span,

@@ -6,6 +6,7 @@ from app.models.schemas import ApprovalDecisionRequest, ApprovalRecord
 from app.services.approval import approval_service
 from app.services.audit import audit_service
 from app.services.mcp_gateway import mcp_gateway_service
+from app.services.workflows import workflow_service
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -50,6 +51,9 @@ def decide_approval(
             detail="Approval request not found",
         )
     execution = mcp_gateway_service.apply_approval(approval_id)
+    workflow = (
+        workflow_service.handle_execution_update(execution) if execution else None
+    )
     audit_service.record(
         actor_id=user.user_id,
         event_type="approvals.decide",
@@ -58,6 +62,8 @@ def decide_approval(
             "approved": payload.approved,
             "execution_id": decision.execution_id or "",
             "execution_status": execution.status if execution else "not_linked",
+            "workflow_id": workflow.workflow_id if workflow else "",
+            "workflow_status": workflow.status if workflow else "not_linked",
         },
     )
     return decision

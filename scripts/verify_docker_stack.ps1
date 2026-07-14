@@ -188,7 +188,46 @@ try {
         throw "Security MCP approval did not resume the exact simulated email execution."
     }
 
-    Write-Host "Backend API, Postgres, Redis worker, RAG, and Security MCP smoke tests passed."
+    $workflowBody = @{
+        prompt = "Find the Acme renewal policy, create a verification task, and send a reply"
+    } | ConvertTo-Json
+    $workflow = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/agent/workflows" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $workflowBody
+    $workflowApproval = $workflow.actions | `
+        Where-Object { $_.status -eq "waiting_for_approval" } | `
+        Select-Object -First 1
+    if (
+        $workflow.status -ne "waiting_for_approval" -or
+        -not $workflowApproval.approval_id
+    ) {
+        throw "Agent workflow did not execute safe actions and pause for approval."
+    }
+    Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/approvals/$($workflowApproval.approval_id)/decision" `
+        -Headers $managerHeaders `
+        -ContentType "application/json" `
+        -Body '{"approved":true}' | Out-Null
+    $completedWorkflow = Invoke-RestMethod `
+        -Method Get `
+        -Uri "http://127.0.0.1:8000/api/agent/workflows/$($workflow.workflow_id)" `
+        -Headers $headers
+    $workflowEmail = $completedWorkflow.actions | `
+        Where-Object { $_.tool_name -eq "send_email" } | `
+        Select-Object -First 1
+    if (
+        $completedWorkflow.status -ne "completed" -or
+        $workflowEmail.status -ne "completed" -or
+        $workflowEmail.result.delivery_mode -ne "simulated"
+    ) {
+        throw "Approval did not resume and complete the agent workflow."
+    }
+
+    Write-Host "Backend API, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
     Wait-Http -Url "http://127.0.0.1:5173" -Name "Frontend preview"
     Write-Host "Docker stack verification passed."
     Write-Host "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

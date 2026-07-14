@@ -119,7 +119,15 @@ type AsyncJobResponse = {
 type AgentWorkflowRecord = {
   workflow_id: string;
   prompt: string;
-  status: "planned" | "waiting_for_approval" | "completed" | "blocked";
+  requested_by: string;
+  status:
+    | "planned"
+    | "running"
+    | "waiting_for_approval"
+    | "completed"
+    | "blocked"
+    | "failed"
+    | "cancelled";
   plan: {
     summary: string;
     actions: {
@@ -130,6 +138,32 @@ type AgentWorkflowRecord = {
       scope: string;
     }[];
   };
+  actions: {
+    action_instance_id: string;
+    sequence: number;
+    action_type: string;
+    tool_name: string;
+    description: string;
+    required_scope: string;
+    requires_approval: boolean;
+    status:
+      | "pending"
+      | "running"
+      | "waiting_for_approval"
+      | "completed"
+      | "blocked"
+      | "failed"
+      | "cancelled"
+      | "skipped";
+    attempt_count: number;
+    max_attempts: number;
+    result: Record<string, unknown>;
+    execution_id: string | null;
+    approval_id: string | null;
+    error: string | null;
+  }[];
+  current_action_index: number;
+  last_error: string | null;
 };
 
 type MCPToolDefinition = {
@@ -600,6 +634,28 @@ export default function App() {
       await refreshAll();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Workflow failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runWorkflowCommand(
+    workflowId: string,
+    command: "resume" | "retry" | "cancel",
+  ) {
+    setBusy(true);
+    try {
+      const workflow = await api<AgentWorkflowRecord>(
+        `/api/agent/workflows/${workflowId}/${command}`,
+        { method: "POST" },
+      );
+      setWorkflows((current) =>
+        current.map((item) => (item.workflow_id === workflowId ? workflow : item)),
+      );
+      setMessage(`Workflow ${workflowId} is ${workflow.status}.`);
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `Could not ${command} workflow`);
     } finally {
       setBusy(false);
     }
@@ -1083,19 +1139,103 @@ export default function App() {
                 Create workflow
               </button>
             </form>
-            <div className="item-list">
-              {workflows.map((workflow) => (
-                <article key={workflow.workflow_id} className="item">
-                  <strong>{workflow.status}</strong>
-                  <span>{workflow.prompt}</span>
-                  <small>{workflow.plan.summary}</small>
-                  {workflow.plan.actions.map((action) => (
-                    <small key={action.action_id}>
-                      {action.action_type} | {action.requires_approval ? "approval" : "safe"}
-                    </small>
-                  ))}
-                </article>
-              ))}
+            <div className="item-list workflow-list">
+              {workflows.map((workflow) => {
+                const completedActions = workflow.actions.filter(
+                  (action) => action.status === "completed" || action.status === "skipped",
+                ).length;
+                const canResume = ["planned", "running", "waiting_for_approval"].includes(
+                  workflow.status,
+                );
+                const canCancel = !["completed", "cancelled"].includes(workflow.status);
+                return (
+                  <article key={workflow.workflow_id} className="workflow-card">
+                    <div className="workflow-heading">
+                      <div>
+                        <span className={`status-pill status-${workflow.status}`}>
+                          {workflow.status.replaceAll("_", " ")}
+                        </span>
+                        <strong>{workflow.prompt}</strong>
+                      </div>
+                      <small>
+                        {completedActions}/{workflow.actions.length} actions
+                      </small>
+                    </div>
+                    <progress
+                      value={completedActions}
+                      max={Math.max(workflow.actions.length, 1)}
+                    />
+                    <small>{workflow.plan.summary}</small>
+                    <div className="workflow-timeline">
+                      {workflow.actions.map((action) => (
+                        <div key={action.action_instance_id} className="workflow-action">
+                          <div className={`workflow-marker status-${action.status}`}>
+                            {action.status === "completed" ? (
+                              <CheckCircle2 size={16} />
+                            ) : ["blocked", "failed", "cancelled"].includes(action.status) ? (
+                              <XCircle size={16} />
+                            ) : (
+                              action.sequence + 1
+                            )}
+                          </div>
+                          <div className="workflow-action-body">
+                            <div className="workflow-action-title">
+                              <strong>{action.tool_name.replaceAll("_", " ")}</strong>
+                              <span className={`status-pill status-${action.status}`}>
+                                {action.status.replaceAll("_", " ")}
+                              </span>
+                            </div>
+                            <small>{action.description}</small>
+                            <small>
+                              {action.required_scope} | attempt {action.attempt_count}/
+                              {action.max_attempts}
+                            </small>
+                            {action.execution_id && <code>MCP {action.execution_id}</code>}
+                            {action.approval_id && <code>Approval {action.approval_id}</code>}
+                            {Object.keys(action.result).length > 0 && (
+                              <code>{JSON.stringify(action.result)}</code>
+                            )}
+                            {action.error && <em>{action.error}</em>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {workflow.last_error && <em>{workflow.last_error}</em>}
+                    <div className="button-row">
+                      {canResume && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void runWorkflowCommand(workflow.workflow_id, "resume")}
+                        >
+                          <RefreshCw size={15} />
+                          Resume
+                        </button>
+                      )}
+                      {workflow.status === "failed" && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void runWorkflowCommand(workflow.workflow_id, "retry")}
+                        >
+                          <RotateCcw size={15} />
+                          Retry failed action
+                        </button>
+                      )}
+                      {canCancel && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void runWorkflowCommand(workflow.workflow_id, "cancel")}
+                        >
+                          <XCircle size={15} />
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
               {workflows.length === 0 && <p className="empty">No workflows created yet.</p>}
             </div>
           </section>

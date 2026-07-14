@@ -10,6 +10,7 @@ from app.services.approval import approval_service
 from app.services.mcp_protocol import security_mcp, security_mcp_http_app
 from app.services.policies import policy_service
 from app.services.users import user_service
+from app.services.workflows import workflow_service
 
 settings = get_settings()
 if settings.run_migrations_on_startup:
@@ -17,6 +18,7 @@ if settings.run_migrations_on_startup:
 user_service.seed_demo_users()
 approval_service.seed_demo_request()
 policy_service.seed_defaults()
+workflow_service.backfill_legacy_actions()
 
 
 @asynccontextmanager
