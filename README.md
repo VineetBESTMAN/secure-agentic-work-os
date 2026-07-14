@@ -1,52 +1,48 @@
 # Secure Agentic AI Work OS
 
-Secure Agentic AI Work OS is a portfolio-grade starter for an enterprise AI copilot that can search company knowledge, summarize emails, propose actions, and enforce approvals before sensitive tool execution.
+Secure Agentic AI Work OS is a working reference implementation of an enterprise AI copilot. It combines document ingestion and retrieval, approval-gated agent workflows, role-based access, auditable tool execution, background jobs, and a standards-compatible MCP security gateway.
 
-## Why this project matters
+The application runs locally with Docker Compose and supports testing with real uploaded documents. High-risk side effects remain safely simulated.
 
-This repository is designed to demonstrate the engineering patterns companies want from modern AI systems:
+## Implemented capabilities
 
-- Retrieval-augmented answers over internal documents with citations
-- Role-based access and policy-aware retrieval
-- Approval-gated agent workflows instead of unchecked tool execution
-- Standards-compatible MCP tool routing behind a security gateway
-- Prompt injection detection, audit logging, and action traceability
+- JWT authentication with `admin`, `manager`, and `employee` roles
+- Persistent document uploads for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
+- Extraction, chunking, embeddings, semantic search, and cited RAG answers
+- PostgreSQL with `pgvector` and HNSW indexing, plus a SQLite fallback for local development
+- Document inspection, metadata editing, re-indexing, deletion, and unsafe-content review
+- Prompt-injection detection for uploaded content and tool arguments
+- Redis/RQ jobs for uploads, re-indexing, and connector imports
+- Durable agent workflows with action state, retries, cancellation, approvals, and idempotency
+- Authenticated MCP tools for document search, task creation, email simulation, and data export
+- Approval records bound to immutable payload hashes with replay protection
+- Google Drive OAuth browsing and selected-file import into the document library
+- Policy evaluation, job monitoring, approvals, connector status, and audit visibility in the React UI
+- Alembic migrations and automated Docker verification
+- GitHub Actions checks for backend tests, migration round trips, frontend builds, and dependency audits
 
 ## Architecture
 
 ### Frontend
 
-- React + TypeScript + Vite
-- Tailwind-ready project structure
-- Dashboard-focused UI shell for search, approvals, and audit visibility
+- React 19, TypeScript, and Vite
+- Responsive operations dashboard for documents, search, workflows, approvals, connectors, jobs, MCP tools, and audit events
+- Live API integration with JWT-authenticated requests
 
 ### Backend
 
-- FastAPI application with modular route groups
-- JWT utilities and role-aware request handling
-- Alembic-versioned SQLite and PostgreSQL persistence for application state
-- Real upload ingestion for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
-- Local embedding RAG over uploaded document chunks with citations
-- Optional PostgreSQL + `pgvector` storage with HNSW vector indexing
-- Document management for source inspection, metadata edits, delete, and re-index
-- Unsafe document review for prompt-injection flagged uploads
-- Policy engine with default document-access, tool-approval, and prompt-safety rules
-- Redis/RQ background workers for document ingestion, reindexing, and connector imports
-- Resumable workflow state machine with persisted actions, retries, cancellation, and idempotent MCP execution
-- CI and Docker scaffolding for production-oriented validation
-- Approval workflow service for high-risk actions
-- Authenticated MCP Streamable HTTP server with server-owned scopes and structured tools
-- Approval-bound tool executions with immutable payload hashes and replay protection
-- Prompt guard for suspicious content detection
-- OAuth-ready connector endpoints for Google Workspace, GitHub, Slack, Notion, and Jira
-- Audit service for immutable-style activity trails
+- FastAPI with modular route, service, model, and policy layers
+- SQLAlchemy persistence managed by Alembic migrations
+- Local deterministic embeddings or optional OpenAI embeddings
+- Security MCP server exposed through Streamable HTTP
+- OAuth connector framework with a working Google Drive file flow
 
-### Data and infra
+### Data and infrastructure
 
-- PostgreSQL for app state
-- `pgvector` storage with HNSW indexing for embeddings
-- Redis queues for ingestion workers and future caching
-- Docker Compose starter for local development
+- PostgreSQL stores application state and `pgvector` embeddings in Docker mode
+- Redis carries background ingestion jobs to the RQ worker
+- Named Docker volumes persist database data and uploaded files
+- SQLite and inline jobs provide a low-dependency local development mode
 
 ## Repository layout
 
@@ -57,187 +53,127 @@ backend/
     core/
     models/
     services/
+  alembic/
   tests/
 frontend/
   src/
+scripts/
+docker-compose.yml
 ```
 
-## Initial product scope
+## Run with Docker
 
-### Phase 1
+### Prerequisites
 
-- Login and JWT-based session handling
-- Roles: `admin`, `manager`, `employee`
-- Document upload metadata model
-- RAG query endpoint with citations
-- Agent workflow endpoint that produces approval-gated action plans
-- MCP gateway endpoint that enforces scoped permissions
+- Git
+- Docker Desktop with Docker Compose
 
-### Phase 2
+Clone and start the complete stack:
 
-- OAuth integrations for Gmail, Google Drive, Calendar, Slack, Jira, GitHub
-- Queue-backed async summarization and ingestion
-- Full policy engine and admin rules
-- Cost, latency, and model observability
-- End-to-end audit dashboard
+```bash
+git clone https://github.com/VineetBESTMAN/secure-agentic-work-os.git
+cd secure-agentic-work-os
+docker compose up --build -d
+docker compose ps
+```
 
-## Security goals
+Open `http://127.0.0.1:5173` after all services are healthy.
 
-This starter treats security as a first-class product feature:
+The stack starts five containers:
 
-- Reject unapproved high-risk actions
-- Restrict tool calls by user role and scope
-- Flag prompt-injection patterns from documents and emails
-- Keep auditable records of queries, decisions, and tool execution
-- Separate agent intent from actual side-effecting operations
+- `frontend`: serves the React application on port `5173`
+- `backend`: serves the FastAPI REST and MCP endpoints on port `8000`
+- `postgres`: persists application records and vector embeddings
+- `redis`: queues background work
+- `worker`: processes document and connector jobs from Redis
 
-## Getting started
+Stop the stack without deleting persisted volumes:
 
-### Backend
+```bash
+docker compose down
+```
 
-1. Create a virtual environment.
-2. Install dependencies from `backend/pyproject.toml`.
-3. Run `uvicorn app.main:app --reload` from `backend/`.
+## Demo accounts
 
-### Frontend
+All local demo users use the password `demo-password`.
 
-1. Install dependencies in `frontend/`.
-2. Run `npm run dev`.
+| Role | Email | Purpose |
+| --- | --- | --- |
+| Admin | `admin@demo.local` | Upload data, run searches, create workflows, and use MCP tools |
+| Manager | `manager@demo.local` | Review and decide approval-gated actions |
+| Employee | `employee@demo.local` | Exercise restricted role and scope behavior |
 
-## Testing with real data
+## Test with real data
 
-1. Open `http://127.0.0.1:5173`.
-2. Sign in with `admin@demo.local` and `demo-password`.
-3. Upload a `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, or `.docx` file.
-4. Ask a question about the uploaded content.
-5. Review the cited passages, document library, source chunks, approvals, connector status, and audit trail.
-6. Use document actions to view chunks, edit metadata, re-index, or delete documents.
-7. Import a Google Drive-style note from the connector panel and watch the job list.
-8. Create an agent workflow and watch safe actions execute until the email action pauses for approval.
-9. Use the Security MCP Console to run document search or create a persistent task.
+1. Sign in at `http://127.0.0.1:5173` as `admin@demo.local`.
+2. Upload a supported file from the Documents panel.
+3. Wait for its ingestion job to reach `completed`.
+4. Ask a question whose answer appears in the uploaded file.
+5. Inspect the cited source passage and searchable chunks.
+6. Edit the document metadata, re-index it, or delete it to test the management lifecycle.
+7. Create an agent workflow containing `create a task and send a reply`.
+8. Sign in as `manager@demo.local` and approve the waiting email action.
+9. Confirm the workflow completes and the email result reports `delivery_mode: simulated`.
+
+Uploaded content, extracted chunks, workflows, jobs, approvals, and audit records persist across container restarts through Docker volumes.
+
+## Security model
+
+- Roles and JWT scopes restrict API and MCP operations.
+- Policy checks separate an agent's proposed action from actual tool execution.
+- High-risk email and export operations require a separate manager approval.
+- Requesters cannot approve their own actions.
+- Approvals are bound to the exact stored payload through a canonical SHA-256 hash.
+- Stable idempotency keys prevent duplicate tasks or simulated deliveries during retries.
+- Prompt guards flag suspicious instructions in documents and tool arguments.
+- Security-relevant activity is recorded in the audit log.
+
+Email delivery is intentionally simulated. The application does not send an external email during the approval demo.
 
 ## Security MCP server
 
-The standards-compatible MCP endpoint is:
+The Streamable HTTP MCP endpoint is:
 
 ```text
 http://127.0.0.1:8000/protocol/mcp
 ```
 
-It uses the same JWT bearer token as the REST API and currently advertises four structured tools:
+It accepts the same JWT bearer token as the REST API and exposes four structured tools:
 
-- `search_documents` runs immediately with `documents:read`.
-- `create_task` persists a task immediately with `tasks:write`.
-- `send_email` requires separate human approval and completes in safe simulation mode.
-- `export_data` requires separate human approval before returning accessible document metadata.
+- `search_documents` runs with the server-owned `documents:read` scope.
+- `create_task` persists a task with the server-owned `tasks:write` scope.
+- `send_email` creates an approval request and completes in simulation mode after approval.
+- `export_data` creates an approval request before returning accessible document metadata.
 
-The server determines each required scope; a client-supplied scope cannot downgrade security. Every request is validated and prompt-scanned, persisted with a canonical SHA-256 argument hash, and audited. Approval resumes only the exact stored payload, requesters cannot approve their own action, and repeat decisions are rejected.
+The server determines each required scope, validates and prompt-scans arguments, stores a canonical argument hash, and audits the execution. A client-supplied scope cannot reduce these controls.
 
-To test the complete approval lifecycle in the UI:
+## Agent workflows
 
-1. Sign in as `admin@demo.local` with `demo-password`.
-2. Run `send_email` from the Security MCP Console.
-3. Sign out, then sign in as `manager@demo.local` with `demo-password`.
-4. Approve the pending action in the Approvals panel.
-5. Confirm that the execution changes to `completed` with `delivery_mode: simulated`; no external email is sent.
+Each workflow action is a durable database record. Document search and task creation execute through the MCP gateway, while email pauses in `waiting_for_approval`. A manager decision updates the hash-bound MCP execution and resumes the parent workflow automatically.
 
-## Agent workflow state machine
+The UI displays action attempts, approval IDs, MCP execution IDs, results, and failures. Workflows support safe resume, up to three retry attempts after failure, and cancellation. Idempotency keys reuse an existing execution instead of creating duplicate side effects.
 
-Agent workflows now materialize each planned action as a durable database record. Document search and task creation execute through the Security MCP gateway, while email pauses in `waiting_for_approval`. A manager decision updates the exact hash-bound MCP execution and automatically resumes the parent workflow.
+## Background jobs
 
-The Agent Workflows panel shows live progress, action attempts, approval IDs, MCP execution IDs, results, and failures. A workflow can be resumed safely while waiting, retried up to three times after a failure, or cancelled. Stable idempotency keys ensure that repeated resume or retry requests reuse the original execution instead of creating duplicate tasks or deliveries.
+Uploads, re-index requests, and connector imports return a job ID immediately. The RQ worker then performs extraction, chunking, embedding, and persistence. Jobs report `queued`, `running`, `completed`, or `failed` status in the dashboard and retry worker failures up to three times.
 
-To test the complete workflow lifecycle:
-
-1. Sign in as `admin@demo.local` and create a workflow containing “create a task and send a reply.”
-2. Confirm document search and task creation are `completed`, while email is `waiting for approval`.
-3. Sign in as `manager@demo.local` and approve the workflow email in the Approvals panel.
-4. Confirm the workflow automatically becomes `completed` and the email result remains `simulated`.
-
-Uploaded files and searchable chunks persist in `backend/data/workos.db` and `backend/data/uploads/`.
-
-## Background ingestion workers
-
-The UI sends uploads, reindex requests, and manual connector imports to queued endpoints. Each request immediately returns a job ID, and the UI polls the job while an RQ worker performs extraction, chunking, embedding, and database persistence.
-
-Docker enables workers automatically:
-
-```bash
-docker compose up --build -d
-docker compose ps
-```
-
-The stack includes a dedicated `worker` service connected to Redis, PostgreSQL, and the shared upload volume. Jobs move through `queued`, `running`, `completed`, or `failed`, report progress in the dashboard, and retry worker failures up to three times.
-
-For local development without Redis, queued endpoints execute inline by default:
+Local development can execute these operations inline without Redis:
 
 ```text
 APP_ASYNC_JOBS_ENABLED=false
 APP_ASYNC_JOBS_FALLBACK_SYNC=true
 ```
 
-To run a local worker, set `APP_ASYNC_JOBS_ENABLED=true`, start Redis, and run this from `backend/`:
+## Embeddings and retrieval
 
-```bash
-rq worker --url redis://127.0.0.1:6379/0 ingestion
-```
-
-## PostgreSQL and pgvector mode
-
-SQLite is still available as a zero-setup local fallback. To run the vector database path:
-
-1. Start Postgres with pgvector.
-
-```bash
-docker compose up -d postgres
-```
-
-2. Create a `.env` file in the repo root with:
-
-```text
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agentic_work_os
-APP_VECTOR_DIMENSIONS=384
-```
-
-3. Restart the backend.
-
-```bash
-cd backend
-./.venv/Scripts/python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-When `DATABASE_URL` is set to PostgreSQL, the backend creates the `vector` extension, stores chunk embeddings in a `vector(384)` column, and ranks citations with cosine distance.
-
-## Database migrations
-
-Alembic owns the SQLite and PostgreSQL schema. Application startup runs `alembic upgrade head` before demo data is seeded, so existing installations are adopted without deleting documents and fresh installations receive the complete schema.
-
-Run migration commands from `backend/`:
-
-```bash
-python -m alembic current
-python -m alembic history
-python -m alembic upgrade head
-```
-
-Create each future schema change as a revision:
-
-```bash
-python -m alembic revision -m "describe the schema change"
-```
-
-Then implement `upgrade()` and `downgrade()` in the generated file and test both directions. Downgrading the initial baseline to `base` removes application tables, so back up production data before running destructive downgrade commands.
-
-## Embedding providers
-
-The app defaults to deterministic local embeddings so upload, RAG, and citations work without an API key:
+The default deterministic local embedding provider makes upload, search, and citations work without an API key:
 
 ```text
 APP_EMBEDDING_PROVIDER=local
 APP_VECTOR_DIMENSIONS=384
 ```
 
-For higher-quality semantic retrieval, enable OpenAI embeddings:
+OpenAI embeddings can be enabled through environment variables:
 
 ```text
 APP_EMBEDDING_PROVIDER=openai
@@ -246,77 +182,83 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 APP_VECTOR_DIMENSIONS=384
 ```
 
-The OpenAI provider uses the embeddings API with `text-embedding-3-small` by default and requests 384 output dimensions so it remains compatible with the local pgvector schema. After changing embedding providers or dimensions, re-index existing documents or re-upload them so stored chunk vectors match the active provider.
+The configured OpenAI model receives a request for 384 output dimensions to match the pgvector schema. Re-index uploaded documents after changing the embedding provider or vector dimensions.
 
-## OAuth connector setup
+## Google Drive OAuth
 
-Connectors are wired for real OAuth but require provider credentials. Add the relevant values to `.env`, then restart the backend:
+The Google connector can browse recent Drive files and import selected supported files into the RAG document library.
 
-```text
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-SLACK_CLIENT_ID=
-SLACK_CLIENT_SECRET=
-NOTION_CLIENT_ID=
-NOTION_CLIENT_SECRET=
-JIRA_CLIENT_ID=
-JIRA_CLIENT_SECRET=
-```
+1. Create a Google Cloud OAuth client and enable the Google Drive API.
+2. Register `http://127.0.0.1:8000/api/connectors/google/callback` as an authorized redirect URI.
+3. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in a root `.env` file.
+4. Restart the Docker stack.
+5. Authorize Google Workspace from the Connectors panel, browse files, and import the selected items.
 
-Use `http://127.0.0.1:8000/api/connectors/{provider}/callback` as the redirect URL pattern when creating provider apps.
+The repository also contains OAuth configuration endpoints for GitHub, Slack, Notion, and Jira. Their UI status remains `not_configured` unless matching client credentials are supplied.
 
-### Google Drive connector
+## Local development
 
-The Google connector can browse recent Drive files and import selected files into the RAG library after OAuth is connected.
+Docker is the primary full-stack path. The backend and frontend can also run directly for development.
 
-1. Create a Google Cloud OAuth app and enable the Google Drive API.
-2. Add this redirect URI to the OAuth client:
-
-```text
-http://127.0.0.1:8000/api/connectors/google/callback
-```
-
-3. Add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to `.env`.
-4. Restart the backend or Docker stack.
-5. Open the app, sign in, authorize Google Workspace, search Drive files, select importable files, and click **Import selected**.
-
-The backend uses Google Drive `files.list` for browsing, `files.get?alt=media` for stored files, and `files.export` for Google Docs, Sheets, and Slides.
-
-## CI and Docker
-
-GitHub Actions run backend tests, frontend build, and frontend audit on pushes to `main` and pull requests.
-
-Docker Compose can run the full stack when Docker is available:
+Backend on Windows Git Bash:
 
 ```bash
-docker compose up --build
+cd backend
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -e ".[dev]"
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-This starts:
+Frontend in a second terminal:
 
-- FastAPI backend on `http://127.0.0.1:8000`
-- React preview server on `http://127.0.0.1:5173`
-- PostgreSQL with `pgvector`
-- Redis and an RQ ingestion worker
+```bash
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1
+```
 
-For a repeatable verification run, install and start Docker Desktop, then run one of these commands from the repo root:
+Without a PostgreSQL `DATABASE_URL`, the backend uses SQLite at `backend/data/workos.db`. Uploaded files are stored in `backend/data/uploads/`, and queued operations run inline by default.
+
+## Database migrations
+
+Application startup runs `alembic upgrade head` before demo data is seeded. Run migration commands from `backend/`:
+
+```bash
+python -m alembic current
+python -m alembic history
+python -m alembic upgrade head
+```
+
+Create and validate a schema revision with:
+
+```bash
+python -m alembic revision -m "describe the schema change"
+python -m alembic upgrade head
+python -m alembic downgrade -1
+python -m alembic upgrade head
+```
+
+Back up persistent data before executing a downgrade against a populated environment.
+
+## Verification and CI
+
+Run the complete Docker smoke test from the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/verify_docker_stack.ps1
 ```
 
+or:
+
 ```bash
 bash scripts/verify_docker_stack.sh
 ```
 
-The verification scripts build the stack, verify the database is at the latest Alembic head, sign in with the demo admin user, import a sample connector note through Redis/RQ, query PostgreSQL/pgvector for a cited answer, execute the Security MCP lifecycle, complete an approval-resumed agent workflow, and confirm the frontend is reachable.
+The verification scripts build the stack, check the Alembic revision, sign in, import a queued sample, query PostgreSQL/pgvector, execute the MCP approval lifecycle, complete an approval-resumed workflow, and confirm the frontend is reachable.
 
-## Suggested next steps
+GitHub Actions run backend tests, an Alembic upgrade/downgrade round trip, the frontend production build, and `npm audit --audit-level=moderate` on pushes to `main` and on pull requests.
 
-1. Add retrieval quality evaluation sets for local vs OpenAI embeddings.
-2. Add organization-aware identity, permissions, and tenant isolation.
-3. Replace simulated MCP side effects with provider-backed delivery adapters.
-4. Add more real connectors after Google Drive, such as Gmail and Calendar imports.
-5. Add workflow schedules, event triggers, and long-running timeout policies.
+## Public repository safety
+
+This repository is configured for local demonstration, not direct internet exposure. The Docker defaults include known demo credentials, a development database password, and `APP_SECRET_KEY=change-me`. Keep `.env` files and provider secrets untracked, and replace all default secrets before exposing any service outside the local machine.
