@@ -85,8 +85,10 @@ DRIVE_MIME_EXTENSIONS = {
 
 
 class ConnectorService:
-    def list_connectors(self) -> list[ConnectorRecord]:
-        connected = self._connected_accounts_by_provider()
+    def list_connectors(
+        self, organization_id: str = "org_default"
+    ) -> list[ConnectorRecord]:
+        connected = self._connected_accounts_by_provider(organization_id)
         records = []
         for provider, definition in PROVIDERS.items():
             account = connected.get(provider)
@@ -124,10 +126,10 @@ class ConnectorService:
         with get_connection() as connection:
             connection.execute(
                 """
-                INSERT INTO oauth_states (state, provider, requested_by)
-                VALUES (?, ?, ?)
+                INSERT INTO oauth_states (state, provider, requested_by, organization_id)
+                VALUES (?, ?, ?, ?)
                 """,
-                (state, provider, user.user_id),
+                (state, provider, user.user_id, user.organization_id),
             )
 
         query: dict[str, str] = {
@@ -155,7 +157,7 @@ class ConnectorService:
 
     async def complete_callback(self, provider: str, code: str, state: str) -> ConnectorRecord:
         self._require_provider(provider)
-        requested_by = self._consume_state(provider=provider, state=state)
+        requested_by, organization_id = self._consume_state(provider=provider, state=state)
 
         token_payload = await self._exchange_code(provider=provider, code=code)
         access_token = token_payload.get("access_token")
@@ -173,9 +175,9 @@ class ConnectorService:
                 INSERT INTO connector_accounts (
                     connector_id, provider, account_label, status, scopes_json,
                     token_cipher, refresh_token_cipher, expires_at, created_by,
-                    created_at, updated_at
+                    created_at, updated_at, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     f"con_{uuid4().hex}",
@@ -189,10 +191,15 @@ class ConnectorService:
                     requested_by,
                     now,
                     now,
+                    organization_id,
                 ),
             )
 
-        return next(record for record in self.list_connectors() if record.provider == provider)
+        return next(
+            record
+            for record in self.list_connectors(organization_id)
+            if record.provider == provider
+        )
 
     def import_items(
         self, payload: ConnectorImportRequest, user: UserContext
@@ -202,6 +209,7 @@ class ConnectorService:
             job_type=f"{payload.provider}.import",
             detail={"provider": payload.provider, "items": len(payload.items)},
             created_by=user.user_id,
+            organization_id=user.organization_id,
         )
         imported = []
         try:
@@ -213,6 +221,7 @@ class ConnectorService:
                         classification=item.classification,
                         owner_team=item.owner_team,
                         uploaded_by=user.user_id,
+                        organization_id=user.organization_id,
                     )
                 )
             job = job_service.update(
@@ -238,8 +247,11 @@ class ConnectorService:
         search: str | None,
         page_size: int,
         page_token: str | None,
+        organization_id: str = "org_default",
     ) -> GoogleDriveFileListResponse:
-        token = await self._access_token(provider="google")
+        token = await self._access_token(
+            provider="google", organization_id=organization_id
+        )
         params: dict[str, str | int | bool] = {
             "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,size,webViewLink)",
             "includeItemsFromAllDrives": True,
@@ -274,11 +286,14 @@ class ConnectorService:
         payload: GoogleDriveImportRequest,
         user: UserContext,
     ) -> ConnectorImportResponse:
-        token = await self._access_token(provider="google")
+        token = await self._access_token(
+            provider="google", organization_id=user.organization_id
+        )
         job = job_service.create(
             job_type="google.drive_import",
             detail={"provider": "google", "file_ids": payload.file_ids},
             created_by=user.user_id,
+            organization_id=user.organization_id,
         )
         imported = []
         try:
@@ -295,6 +310,7 @@ class ConnectorService:
                         classification=payload.classification,
                         owner_team=payload.owner_team,
                         uploaded_by=user.user_id,
+                        organization_id=user.organization_id,
                     )
                 )
             job = job_service.update(
@@ -316,15 +332,16 @@ class ConnectorService:
 
         return ConnectorImportResponse(job=job, imported_documents=imported)
 
-    def _connected_accounts_by_provider(self):
+    def _connected_accounts_by_provider(self, organization_id: str):
         with get_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT *
                 FROM connector_accounts
-                WHERE status = 'connected'
+                WHERE status = 'connected' AND organization_id = ?
                 ORDER BY updated_at DESC
-                """
+                """,
+                (organization_id,),
             ).fetchall()
         accounts = {}
         for row in rows:
@@ -347,7 +364,7 @@ class ConnectorService:
         if provider not in PROVIDERS:
             raise ValueError("Unsupported connector provider.")
 
-    def _consume_state(self, provider: str, state: str) -> str:
+    def _consume_state(self, provider: str, state: str) -> tuple[str, str]:
         with get_connection() as connection:
             row = connection.execute(
                 "SELECT * FROM oauth_states WHERE state = ? AND provider = ?",
@@ -356,7 +373,7 @@ class ConnectorService:
             if row is None:
                 raise ValueError("OAuth state is invalid or expired.")
             connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
-        return row["requested_by"]
+        return row["requested_by"], row["organization_id"]
 
     async def _exchange_code(self, provider: str, code: str) -> dict[str, Any]:
         definition = PROVIDERS[provider]
@@ -398,8 +415,12 @@ class ConnectorService:
             tz=timezone.utc,
         ).isoformat()
 
-    async def _access_token(self, provider: str) -> str:
-        account = self._connected_account(provider=provider)
+    async def _access_token(
+        self, provider: str, organization_id: str = "org_default"
+    ) -> str:
+        account = self._connected_account(
+            provider=provider, organization_id=organization_id
+        )
         token = decrypt_secret(account["token_cipher"])
         if not token:
             raise ValueError(f"{PROVIDERS[provider]['display_name']} is not connected.")
@@ -414,18 +435,18 @@ class ConnectorService:
                 )
         return token
 
-    def _connected_account(self, provider: str):
+    def _connected_account(self, provider: str, organization_id: str):
         self._require_provider(provider)
         with get_connection() as connection:
             row = connection.execute(
                 """
                 SELECT *
                 FROM connector_accounts
-                WHERE provider = ? AND status = 'connected'
+                WHERE provider = ? AND status = 'connected' AND organization_id = ?
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (provider,),
+                (provider, organization_id),
             ).fetchone()
         if row is None:
             raise ValueError(f"{PROVIDERS[provider]['display_name']} is not connected.")

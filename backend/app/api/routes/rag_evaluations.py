@@ -21,7 +21,9 @@ def list_evaluation_datasets(
 ) -> list[RagEvaluationDatasetRecord]:
     require_roles(user.role, allowed_roles={"admin", "manager"})
     return rag_evaluation_service.list_datasets(
-        role=user.role, actor_id=user.user_id
+        role=user.role,
+        actor_id=user.user_id,
+        organization_id=user.organization_id,
     )
 
 
@@ -40,6 +42,7 @@ def create_evaluation_dataset(
             payload=payload,
             created_by=user.user_id,
             role=user.role,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -59,6 +62,7 @@ def create_evaluation_dataset(
             "case_count": dataset.case_count,
             "document_count": len(dataset.document_ids),
         },
+        organization_id=user.organization_id,
     )
     return dataset
 
@@ -71,7 +75,10 @@ def get_evaluation_dataset(
     require_roles(user.role, allowed_roles={"admin", "manager"})
     try:
         return rag_evaluation_service.get_dataset(
-            dataset_id, role=user.role, actor_id=user.user_id
+            dataset_id,
+            role=user.role,
+            actor_id=user.user_id,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -94,6 +101,7 @@ def run_evaluation_dataset(
             providers=payload.providers,
             created_by=user.user_id,
             role=user.role,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -107,6 +115,7 @@ def run_evaluation_dataset(
             "providers": payload.providers,
             "statuses": {run.provider: run.status for run in comparison.runs},
         },
+        organization_id=user.organization_id,
     )
     return comparison
 
@@ -118,7 +127,10 @@ def list_evaluation_runs(
 ) -> list[RagEvaluationRunRecord]:
     require_roles(user.role, allowed_roles={"admin", "manager"})
     return rag_evaluation_service.list_runs(
-        role=user.role, actor_id=user.user_id, limit=limit
+        role=user.role,
+        actor_id=user.user_id,
+        limit=limit,
+        organization_id=user.organization_id,
     )
 
 
@@ -130,7 +142,10 @@ def get_evaluation_run(
     require_roles(user.role, allowed_roles={"admin", "manager"})
     try:
         return rag_evaluation_service.get_run(
-            run_id, role=user.role, actor_id=user.user_id
+            run_id,
+            role=user.role,
+            actor_id=user.user_id,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

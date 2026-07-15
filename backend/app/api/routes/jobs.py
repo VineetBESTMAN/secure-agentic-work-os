@@ -12,7 +12,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 @router.get("/{job_id}", response_model=JobRecord)
 def get_job(job_id: str, user=Depends(get_current_user)) -> JobRecord:
     try:
-        job = job_service.get(job_id)
+        job = job_service.get(job_id, user.organization_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -33,5 +33,6 @@ def list_jobs(user=Depends(get_current_user)) -> list[JobRecord]:
         actor_id=user.user_id,
         event_type="jobs.list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
-    return job_service.list_jobs()
+    return job_service.list_jobs(user.organization_id)

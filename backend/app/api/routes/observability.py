@@ -21,7 +21,7 @@ def get_runtime_summary(
     user=Depends(get_current_user),
 ) -> RuntimeSummary:
     require_roles(user.role, allowed_roles={"admin", "manager"})
-    return observability_service.summary(hours=hours)
+    return observability_service.summary(hours=hours, organization_id=user.organization_id)
 
 
 @router.get("/events", response_model=list[RuntimeObservation])
@@ -31,13 +31,15 @@ def get_runtime_events(
     user=Depends(get_current_user),
 ) -> list[RuntimeObservation]:
     require_roles(user.role, allowed_roles={"admin", "manager"})
-    return observability_service.list_observations(hours=hours, limit=limit)
+    return observability_service.list_observations(
+        hours=hours, limit=limit, organization_id=user.organization_id
+    )
 
 
 @router.get("/budgets", response_model=list[CostBudgetRecord])
 def get_cost_budgets(user=Depends(get_current_user)) -> list[CostBudgetRecord]:
     require_roles(user.role, allowed_roles={"admin", "manager"})
-    return observability_service.list_budgets()
+    return observability_service.list_budgets(user.organization_id)
 
 
 @router.post(
@@ -51,7 +53,9 @@ def create_cost_budget(
 ) -> CostBudgetRecord:
     require_roles(user.role, allowed_roles={"admin"})
     try:
-        budget = observability_service.create_budget(payload, created_by=user.user_id)
+        budget = observability_service.create_budget(
+            payload, created_by=user.user_id, organization_id=user.organization_id
+        )
     except Exception as exc:
         if "unique" not in str(exc).lower() and "duplicate" not in str(exc).lower():
             raise
@@ -63,6 +67,7 @@ def create_cost_budget(
         actor_id=user.user_id,
         event_type="observability.budget_created",
         detail={"budget_id": budget.budget_id, "limit_usd": budget.limit_usd},
+        organization_id=user.organization_id,
     )
     return budget
 
@@ -75,13 +80,16 @@ def update_cost_budget(
 ) -> CostBudgetRecord:
     require_roles(user.role, allowed_roles={"admin"})
     try:
-        budget = observability_service.update_budget(budget_id, payload)
+        budget = observability_service.update_budget(
+            budget_id, payload, user.organization_id
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     audit_service.record(
         actor_id=user.user_id,
         event_type="observability.budget_updated",
         detail={"budget_id": budget.budget_id, "enabled": budget.enabled},
+        organization_id=user.organization_id,
     )
     return budget
 
@@ -89,7 +97,7 @@ def update_cost_budget(
 @router.delete("/budgets/{budget_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_cost_budget(budget_id: str, user=Depends(get_current_user)) -> None:
     require_roles(user.role, allowed_roles={"admin"})
-    if not observability_service.delete_budget(budget_id):
+    if not observability_service.delete_budget(budget_id, user.organization_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Cost budget not found.",
@@ -98,4 +106,5 @@ def delete_cost_budget(budget_id: str, user=Depends(get_current_user)) -> None:
         actor_id=user.user_id,
         event_type="observability.budget_deleted",
         detail={"budget_id": budget_id},
+        organization_id=user.organization_id,
     )

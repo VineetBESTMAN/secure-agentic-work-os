@@ -32,6 +32,7 @@ def ingest_document_task(
     classification: str,
     owner_team: str,
     uploaded_by: str,
+    organization_id: str = "org_default",
 ) -> dict[str, object]:
     path = Path(staged_path)
     completed = False
@@ -54,6 +55,7 @@ def ingest_document_task(
             owner_team=owner_team,
             uploaded_by=uploaded_by,
             document_id=f"doc_{job_id.removeprefix('job_')}",
+            organization_id=organization_id,
         )
         result = {
             "progress": 100,
@@ -75,14 +77,18 @@ def ingest_document_task(
             path.unlink(missing_ok=True)
 
 
-def reindex_document_task(job_id: str, document_id: str, role: str) -> dict[str, object]:
+def reindex_document_task(
+    job_id: str, document_id: str, role: str, organization_id: str = "org_default"
+) -> dict[str, object]:
     job_service.update(
         job_id,
         status="running",
         result={"progress": 20, "message": "Rebuilding searchable chunks."},
     )
     try:
-        document = rag_service.reindex_document(document_id=document_id, role=role)
+        document = rag_service.reindex_document(
+            document_id=document_id, role=role, organization_id=organization_id
+        )
         result = {
             "progress": 100,
             "message": "Document reindex completed.",
@@ -100,6 +106,7 @@ def ingest_connector_items_task(
     job_id: str,
     items: list[dict[str, Any]],
     uploaded_by: str,
+    organization_id: str = "org_default",
 ) -> dict[str, object]:
     job_service.update(
         job_id,
@@ -118,6 +125,7 @@ def ingest_connector_items_task(
                 owner_team=item.owner_team,
                 uploaded_by=uploaded_by,
                 document_id=f"doc_{job_id.removeprefix('job_')}_{index}",
+                organization_id=organization_id,
             )
             document_ids.append(document.document_id)
             job_service.update(

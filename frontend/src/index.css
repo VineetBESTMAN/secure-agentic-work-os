@@ -176,6 +176,42 @@ h2 {
     linear-gradient(145deg, #ffffff 0%, #f7faf5 100%);
 }
 
+.identity-panel {
+  border-color: #a9b9d1;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(78, 93, 154, 0.12), transparent 34%),
+    linear-gradient(145deg, #ffffff 0%, #f7f8fc 100%);
+}
+
+.identity-panel h3 {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+}
+
+.identity-panel details {
+  border-top: 1px solid #d9deea;
+  padding-top: 12px;
+}
+
+.identity-panel summary {
+  margin-bottom: 12px;
+  color: #3f4d81;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.invitation-token {
+  display: block;
+  max-width: 100%;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+  border: 1px solid #cbd3e7;
+  border-radius: 6px;
+  background: #f0f3fa;
+  color: #344477;
+  padding: 9px;
+}
+
 .evaluation-layout {
   display: grid;
   grid-template-columns: minmax(420px, 1.35fr) minmax(280px, 0.65fr);

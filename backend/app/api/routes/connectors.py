@@ -24,8 +24,9 @@ def list_connectors(user=Depends(get_current_user)) -> list[ConnectorRecord]:
         actor_id=user.user_id,
         event_type="connectors.list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
-    return connector_service.list_connectors()
+    return connector_service.list_connectors(user.organization_id)
 
 
 @router.post("/{provider}/authorize", response_model=OAuthStartResponse)
@@ -42,6 +43,7 @@ def authorize_connector(provider: str, user=Depends(get_current_user)) -> OAuthS
         actor_id=user.user_id,
         event_type="connectors.authorize",
         detail={"provider": provider, "configured": response.configured},
+        organization_id=user.organization_id,
     )
     return response
 
@@ -61,6 +63,7 @@ def import_connector_items(
             "items": len(payload.items),
             "job_id": response.job.job_id,
         },
+        organization_id=user.organization_id,
     )
     return response
 
@@ -80,6 +83,7 @@ def queue_connector_items(
             provider=payload.provider,
             items=payload.items,
             requested_by=user.user_id,
+            organization_id=user.organization_id,
         )
     except BackgroundQueueError as exc:
         raise HTTPException(
@@ -95,6 +99,7 @@ def queue_connector_items(
             "items": len(payload.items),
             "job_id": job.job_id,
         },
+        organization_id=user.organization_id,
     )
     return AsyncJobResponse(job=job, message="Connector import was queued.")
 
@@ -112,6 +117,7 @@ async def list_google_drive_files(
             search=search,
             page_size=page_size,
             page_token=page_token,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -123,6 +129,7 @@ async def list_google_drive_files(
         actor_id=user.user_id,
         event_type="connectors.google_drive_list",
         detail={"files": len(response.files), "search": search or ""},
+        organization_id=user.organization_id,
     )
     return response
 
@@ -149,6 +156,7 @@ async def import_google_drive_files(
             "job_id": response.job.job_id,
             "documents": len(response.imported_documents),
         },
+        organization_id=user.organization_id,
     )
     return response
 

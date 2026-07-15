@@ -15,7 +15,7 @@ router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 @router.get("/tools", response_model=list[MCPToolDefinition])
 def list_tools(user=Depends(get_current_user)) -> list[MCPToolDefinition]:
-    return mcp_gateway_service.list_tools()
+    return mcp_gateway_service.list_tools(user.organization_id)
 
 
 @router.get("/executions", response_model=list[MCPExecutionRecord])
@@ -27,7 +27,7 @@ def list_executions(user=Depends(get_current_user)) -> list[MCPExecutionRecord]:
 def get_execution(
     execution_id: str, user=Depends(get_current_user)
 ) -> MCPExecutionRecord:
-    execution = mcp_gateway_service.get_execution(execution_id)
+    execution = mcp_gateway_service.get_execution(execution_id, user.organization_id)
     if execution is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

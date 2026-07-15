@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(
         default=60, validation_alias="APP_ACCESS_TOKEN_EXPIRE_MINUTES"
     )
+    refresh_token_expire_days: int = Field(
+        default=14, validation_alias="APP_REFRESH_TOKEN_EXPIRE_DAYS"
+    )
+    oidc_redirect_base_url: str = Field(
+        default="http://127.0.0.1:8000/api/auth/oidc",
+        validation_alias="APP_OIDC_REDIRECT_BASE_URL",
+    )
     require_approval_for_send_email: bool = Field(
         default=True, validation_alias="APP_REQUIRE_APPROVAL_FOR_SEND_EMAIL"
     )

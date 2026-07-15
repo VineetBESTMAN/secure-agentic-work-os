@@ -9,6 +9,7 @@ import {
   DollarSign,
   Eye,
   FileUp,
+  Building2,
   Plug,
   Play,
   RefreshCw,
@@ -18,13 +19,58 @@ import {
   ShieldCheck,
   Trash2,
   XCircle,
+  UserPlus,
 } from "lucide-react";
 
 type User = {
   user_id: string;
   email: string;
+  display_name: string;
+  organization_id: string;
+  organization_slug: string;
+  organization_name: string;
+  membership_id: string;
   role: "admin" | "manager" | "employee";
   scopes: string[];
+};
+
+type OrganizationSummary = {
+  organization_id: string;
+  slug: string;
+  name: string;
+  membership_id: string;
+  role: "admin" | "manager" | "employee";
+  scopes: string[];
+  status: "active" | "suspended";
+};
+
+type OrganizationMember = {
+  membership_id: string;
+  organization_id: string;
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: "admin" | "manager" | "employee";
+  scopes: string[];
+  status: "active" | "suspended";
+};
+
+type InvitationRecord = {
+  invitation_id: string;
+  email: string;
+  role: "admin" | "manager" | "employee";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expires_at: string;
+  invitation_token: string | null;
+};
+
+type OIDCProvider = {
+  provider_id: string;
+  name: string;
+  issuer_url: string;
+  client_id: string;
+  scopes: string[];
+  enabled: boolean;
 };
 
 type DocumentRecord = {
@@ -302,16 +348,36 @@ const DEFAULT_EVALUATION_CASES = JSON.stringify(
 );
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+let refreshPromise: Promise<string> | null = null;
 
 export default function App() {
   const [email, setEmail] = useState("admin@demo.local");
   const [password, setPassword] = useState("demo-password");
+  const [organizationSlug, setOrganizationSlug] = useState("");
   const [token, setToken] = useState(() => localStorage.getItem("workos_token") || "");
+  const [refreshToken, setRefreshToken] = useState(
+    () => localStorage.getItem("workos_refresh_token") || "",
+  );
   const [user, setUser] = useState<User | null>(() => {
     const stored = localStorage.getItem("workos_user");
     return stored ? JSON.parse(stored) : null;
   });
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [organizations, setOrganizations] = useState<OrganizationSummary[]>([]);
+  const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [invitations, setInvitations] = useState<InvitationRecord[]>([]);
+  const [oidcProviders, setOidcProviders] = useState<OIDCProvider[]>([]);
+  const [newOrganizationName, setNewOrganizationName] = useState("");
+  const [newOrganizationSlug, setNewOrganizationSlug] = useState("");
+  const [invitationEmail, setInvitationEmail] = useState("");
+  const [invitationRole, setInvitationRole] = useState<"admin" | "manager" | "employee">(
+    "employee",
+  );
+  const [latestInvitationToken, setLatestInvitationToken] = useState("");
+  const [oidcName, setOidcName] = useState("");
+  const [oidcIssuer, setOidcIssuer] = useState("");
+  const [oidcClientId, setOidcClientId] = useState("");
+  const [oidcClientSecret, setOidcClientSecret] = useState("");
   const [unsafeDocuments, setUnsafeDocuments] = useState<DocumentRecord[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentDetail | null>(null);
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
@@ -356,15 +422,69 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
+  function persistSession(body: {
+    access_token: string;
+    refresh_token: string;
+    user: User;
+  }) {
+    setToken(body.access_token);
+    setRefreshToken(body.refresh_token);
+    setUser(body.user);
+    localStorage.setItem("workos_token", body.access_token);
+    localStorage.setItem("workos_refresh_token", body.refresh_token);
+    localStorage.setItem("workos_user", JSON.stringify(body.user));
+  }
+
+  function clearSession() {
+    setToken("");
+    setRefreshToken("");
+    setUser(null);
+    setOrganizations([]);
+    setMembers([]);
+    setInvitations([]);
+    setOidcProviders([]);
+    localStorage.removeItem("workos_token");
+    localStorage.removeItem("workos_refresh_token");
+    localStorage.removeItem("workos_user");
+  }
+
+  async function renewAccessToken(): Promise<string> {
+    if (!refreshPromise) {
+      refreshPromise = (async () => {
+        const storedRefresh = localStorage.getItem("workos_refresh_token");
+        if (!storedRefresh) throw new Error("Your session has expired. Sign in again.");
+        const response = await fetch(`${API_BASE}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: storedRefresh }),
+        });
+        if (!response.ok) {
+          clearSession();
+          throw new Error("Your session has expired. Sign in again.");
+        }
+        const body = await response.json();
+        persistSession(body);
+        return body.access_token as string;
+      })().finally(() => {
+        refreshPromise = null;
+      });
+    }
+    return refreshPromise;
+  }
+
   async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(`${API_BASE}${path}`, {
+    const request = (accessToken: string) => fetch(`${API_BASE}${path}`, {
       ...init,
       headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         ...(init.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
         ...init.headers,
       },
     });
+    let response = await request(token);
+    if (response.status === 401 && refreshToken) {
+      response = await request(await renewAccessToken());
+    }
     if (!response.ok) {
       const body = await response.json().catch(() => ({ detail: response.statusText }));
       throw new Error(body.detail || response.statusText);
@@ -377,18 +497,27 @@ export default function App() {
 
   async function refreshAll() {
     if (!token) return;
-    const [documentData, approvalData, connectorData, toolData, executionData] = await Promise.all([
+    const [
+      documentData,
+      approvalData,
+      connectorData,
+      toolData,
+      executionData,
+      organizationData,
+    ] = await Promise.all([
       api<DocumentRecord[]>("/api/documents/library"),
       api<ApprovalRecord[]>("/api/approvals"),
       api<ConnectorRecord[]>("/api/connectors"),
       api<MCPToolDefinition[]>("/api/mcp/tools"),
       api<MCPExecutionRecord[]>("/api/mcp/executions"),
+      api<OrganizationSummary[]>("/api/organizations"),
     ]);
     setDocuments(documentData);
     setApprovals(approvalData);
     setConnectors(connectorData);
     setMcpTools(toolData);
     setMcpExecutions(executionData);
+    setOrganizations(organizationData);
     setWorkflows(await api<AgentWorkflowRecord[]>("/api/agent/workflows"));
     if (user?.scopes.includes("audit:read")) {
       setAuditEvents(await api<AuditEvent[]>("/api/audit/events"));
@@ -402,6 +531,19 @@ export default function App() {
         await api<RagEvaluationDataset[]>("/api/rag-evaluations/datasets"),
       );
       setEvaluationRuns(await api<RagEvaluationRun[]>("/api/rag-evaluations/runs?limit=50"));
+      setMembers(await api<OrganizationMember[]>("/api/organizations/current/members"));
+      setInvitations(
+        await api<InvitationRecord[]>("/api/organizations/current/invitations"),
+      );
+      if (user?.role === "admin") {
+        setOidcProviders(
+          await api<OIDCProvider[]>("/api/organizations/current/oidc-providers"),
+        );
+      }
+    } else {
+      setMembers([]);
+      setInvitations([]);
+      setOidcProviders([]);
     }
   }
 
@@ -442,15 +584,16 @@ export default function App() {
       const response = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({
+          email,
+          password,
+          organization_slug: organizationSlug.trim() || null,
+        }),
       });
       if (!response.ok) throw new Error("Login failed");
       const body = await response.json();
-      setToken(body.access_token);
-      setUser(body.user);
-      localStorage.setItem("workos_token", body.access_token);
-      localStorage.setItem("workos_user", JSON.stringify(body.user));
-      setMessage(`Signed in as ${body.user.email}`);
+      persistSession(body);
+      setMessage(`Signed in to ${body.user.organization_name} as ${body.user.email}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Login failed");
     } finally {
@@ -836,11 +979,137 @@ export default function App() {
     }
   }
 
-  function logout() {
-    setToken("");
-    setUser(null);
-    localStorage.removeItem("workos_token");
-    localStorage.removeItem("workos_user");
+  async function switchOrganization(organizationId: string) {
+    if (!organizationId || organizationId === user?.organization_id) return;
+    setBusy(true);
+    try {
+      const session = await api<{
+        access_token: string;
+        refresh_token: string;
+        user: User;
+      }>("/api/auth/switch-organization", {
+        method: "POST",
+        body: JSON.stringify({ organization_id: organizationId }),
+      });
+      persistSession(session);
+      setSelectedDocument(null);
+      setAnswer(null);
+      setMessage(`Switched to ${session.user.organization_name}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not switch organization");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createOrganization(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const organization = await api<OrganizationSummary>("/api/organizations", {
+        method: "POST",
+        body: JSON.stringify({
+          name: newOrganizationName.trim(),
+          slug: newOrganizationSlug.trim().toLowerCase(),
+        }),
+      });
+      setNewOrganizationName("");
+      setNewOrganizationSlug("");
+      setOrganizations((current) => [...current, organization]);
+      await switchOrganization(organization.organization_id);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not create organization");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inviteMember(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const invitation = await api<InvitationRecord>(
+        "/api/organizations/current/invitations",
+        {
+          method: "POST",
+          body: JSON.stringify({ email: invitationEmail, role: invitationRole }),
+        },
+      );
+      setInvitations((current) => [invitation, ...current]);
+      setLatestInvitationToken(invitation.invitation_token || "");
+      setInvitationEmail("");
+      setMessage(`Invitation created for ${invitation.email}. Share the token securely.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not create invitation");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleMemberStatus(member: OrganizationMember) {
+    setBusy(true);
+    try {
+      const updated = await api<OrganizationMember>(
+        `/api/organizations/current/members/${member.membership_id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: member.status === "active" ? "suspended" : "active",
+          }),
+        },
+      );
+      setMembers((current) =>
+        current.map((item) =>
+          item.membership_id === updated.membership_id ? updated : item,
+        ),
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update membership");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createOidcProvider(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const provider = await api<OIDCProvider>(
+        "/api/organizations/current/oidc-providers",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: oidcName,
+            issuer_url: oidcIssuer,
+            client_id: oidcClientId,
+            client_secret: oidcClientSecret,
+            scopes: ["openid", "email", "profile"],
+          }),
+        },
+      );
+      setOidcProviders((current) => [...current, provider]);
+      setOidcName("");
+      setOidcIssuer("");
+      setOidcClientId("");
+      setOidcClientSecret("");
+      setMessage(`OIDC provider ${provider.name} configured.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not configure OIDC");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    try {
+      if (token) {
+        await api<void>("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+      }
+    } catch {
+      // Local cleanup still prevents this browser from reusing the session.
+    } finally {
+      clearSession();
+    }
   }
 
   const googleConnector = connectors.find((connector) => connector.provider === "google");
@@ -868,6 +1137,14 @@ export default function App() {
               onChange={(event) => setPassword(event.target.value)}
             />
           </label>
+          <label>
+            Organization slug (optional)
+            <input
+              value={organizationSlug}
+              onChange={(event) => setOrganizationSlug(event.target.value)}
+              placeholder="default"
+            />
+          </label>
           <button type="submit" disabled={busy}>
             <ShieldCheck size={16} />
             Sign in
@@ -877,8 +1154,27 @@ export default function App() {
         {user && (
           <div className="session">
             <strong>{user.email}</strong>
-            <span>{user.role}</span>
-            <button type="button" onClick={logout}>
+            <span>{user.display_name || user.role}</span>
+            <label>
+              Organization
+              <select
+                value={user.organization_id}
+                disabled={busy}
+                onChange={(event) => void switchOrganization(event.target.value)}
+              >
+                {organizations.map((organization) => (
+                  <option
+                    key={organization.organization_id}
+                    value={organization.organization_id}
+                    disabled={organization.status !== "active"}
+                  >
+                    {organization.name} · {organization.role}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span>{user.role} · {user.organization_slug}</span>
+            <button type="button" onClick={() => void logout()}>
               <XCircle size={16} />
               Sign out
             </button>
@@ -897,6 +1193,161 @@ export default function App() {
             Refresh
           </button>
         </header>
+
+        {user && (
+          <section className="panel identity-panel">
+            <div className="panel-title">
+              <Building2 size={18} />
+              <h2>Organization & Identity</h2>
+            </div>
+            <p>
+              Active tenant: <strong>{user.organization_name}</strong>. Roles, scopes,
+              documents, workflows, connectors, evaluations, and audit data are isolated to
+              this organization.
+            </p>
+            <form className="split three" onSubmit={createOrganization}>
+              <label>
+                New organization name
+                <input
+                  required
+                  value={newOrganizationName}
+                  onChange={(event) => setNewOrganizationName(event.target.value)}
+                  placeholder="Acme Operations"
+                />
+              </label>
+              <label>
+                URL-safe slug
+                <input
+                  required
+                  pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+                  value={newOrganizationSlug}
+                  onChange={(event) => setNewOrganizationSlug(event.target.value)}
+                  placeholder="acme-operations"
+                />
+              </label>
+              <button type="submit" disabled={busy}>
+                <Building2 size={16} />
+                Create and switch
+              </button>
+            </form>
+
+            {(user.role === "admin" || user.role === "manager") && (
+              <div className="columns">
+                <div>
+                  <h3>Members</h3>
+                  <div className="item-list compact">
+                    {members.map((member) => (
+                      <article key={member.membership_id} className="item">
+                        <strong>{member.display_name || member.email}</strong>
+                        <span>
+                          {member.email} · {member.role} · {member.status}
+                        </span>
+                        {user.role === "admin" && member.user_id !== user.user_id && (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void toggleMemberStatus(member)}
+                          >
+                            {member.status === "active" ? "Suspend" : "Reactivate"}
+                          </button>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <h3>Invitations</h3>
+                  {user.role === "admin" && (
+                    <form className="stack" onSubmit={inviteMember}>
+                      <input
+                        type="email"
+                        required
+                        value={invitationEmail}
+                        onChange={(event) => setInvitationEmail(event.target.value)}
+                        placeholder="person@company.com"
+                      />
+                      <select
+                        value={invitationRole}
+                        onChange={(event) =>
+                          setInvitationRole(
+                            event.target.value as "admin" | "manager" | "employee",
+                          )
+                        }
+                      >
+                        <option value="employee">Employee</option>
+                        <option value="manager">Manager</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                      <button type="submit" disabled={busy}>
+                        <UserPlus size={16} />
+                        Create invitation
+                      </button>
+                    </form>
+                  )}
+                  {latestInvitationToken && (
+                    <code className="invitation-token">{latestInvitationToken}</code>
+                  )}
+                  <div className="item-list compact">
+                    {invitations.map((invitation) => (
+                      <article key={invitation.invitation_id} className="item">
+                        <strong>{invitation.email}</strong>
+                        <span>
+                          {invitation.role} · {invitation.status}
+                        </span>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {user.role === "admin" && (
+              <details>
+                <summary>Optional OIDC / SSO</summary>
+                <form className="split" onSubmit={createOidcProvider}>
+                  <input
+                    required
+                    value={oidcName}
+                    onChange={(event) => setOidcName(event.target.value)}
+                    placeholder="Corporate Identity"
+                  />
+                  <input
+                    required
+                    type="url"
+                    value={oidcIssuer}
+                    onChange={(event) => setOidcIssuer(event.target.value)}
+                    placeholder="https://id.company.com"
+                  />
+                  <input
+                    required
+                    value={oidcClientId}
+                    onChange={(event) => setOidcClientId(event.target.value)}
+                    placeholder="Client ID"
+                  />
+                  <input
+                    required
+                    type="password"
+                    value={oidcClientSecret}
+                    onChange={(event) => setOidcClientSecret(event.target.value)}
+                    placeholder="Client secret"
+                  />
+                  <button type="submit" disabled={busy}>
+                    <ShieldCheck size={16} />
+                    Configure SSO
+                  </button>
+                </form>
+                <div className="item-list compact">
+                  {oidcProviders.map((provider) => (
+                    <article key={provider.provider_id} className="item">
+                      <strong>{provider.name}</strong>
+                      <span>{provider.issuer_url}</span>
+                    </article>
+                  ))}
+                </div>
+              </details>
+            )}
+          </section>
+        )}
 
         <section className="panel-grid">
           <section className="panel primary-panel">

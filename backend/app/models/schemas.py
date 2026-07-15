@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field, model_validator
 class UserContext(BaseModel):
     user_id: str
     email: str
+    display_name: str = ""
+    organization_id: str
+    organization_slug: str
+    organization_name: str
+    membership_id: str
     role: Literal["admin", "manager", "employee"]
     scopes: list[str] = Field(default_factory=list)
 
@@ -15,12 +20,111 @@ class UserContext(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    organization_slug: str | None = None
 
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
+    expires_in: int
     token_type: str = "bearer"
     user: UserContext
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(min_length=32)
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str | None = None
+
+
+class OrganizationSummary(BaseModel):
+    organization_id: str
+    slug: str
+    name: str
+    membership_id: str
+    role: Literal["admin", "manager", "employee"]
+    scopes: list[str] = Field(default_factory=list)
+    status: Literal["active", "suspended"] = "active"
+
+
+class OrganizationCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    slug: str = Field(min_length=2, max_length=63, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+class OrganizationMemberRecord(BaseModel):
+    membership_id: str
+    organization_id: str
+    user_id: str
+    email: str
+    display_name: str
+    role: Literal["admin", "manager", "employee"]
+    scopes: list[str] = Field(default_factory=list)
+    status: Literal["active", "suspended"]
+    created_at: str | None = None
+
+
+class MembershipUpdateRequest(BaseModel):
+    role: Literal["admin", "manager", "employee"] | None = None
+    scopes: list[str] | None = Field(default=None, max_length=50)
+    status: Literal["active", "suspended"] | None = None
+
+
+class InvitationCreateRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    role: Literal["admin", "manager", "employee"] = "employee"
+    scopes: list[str] = Field(default_factory=list, max_length=50)
+    expires_in_hours: int = Field(default=72, ge=1, le=720)
+
+
+class InvitationRecord(BaseModel):
+    invitation_id: str
+    organization_id: str
+    email: str
+    role: Literal["admin", "manager", "employee"]
+    scopes: list[str] = Field(default_factory=list)
+    status: Literal["pending", "accepted", "revoked", "expired"]
+    invited_by: str
+    expires_at: str
+    created_at: str | None = None
+    invitation_token: str | None = None
+
+
+class InvitationAcceptRequest(BaseModel):
+    token: str = Field(min_length=32)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class OrganizationSwitchRequest(BaseModel):
+    organization_id: str
+
+
+class OIDCProviderCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    issuer_url: str = Field(min_length=8, max_length=500)
+    client_id: str = Field(min_length=1, max_length=500)
+    client_secret: str = Field(min_length=1, max_length=2_000)
+    scopes: list[str] = Field(default_factory=lambda: ["openid", "email", "profile"])
+    enabled: bool = True
+
+
+class OIDCProviderRecord(BaseModel):
+    provider_id: str
+    organization_id: str
+    name: str
+    issuer_url: str
+    client_id: str
+    scopes: list[str]
+    enabled: bool
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class OIDCAuthorizationResponse(BaseModel):
+    authorization_url: str
 
 
 class DocumentRecord(BaseModel):
@@ -116,6 +220,7 @@ class RagEvaluationCaseRecord(RagEvaluationCaseCreate):
 
 class RagEvaluationDatasetRecord(BaseModel):
     dataset_id: str
+    organization_id: str
     name: str
     description: str
     document_ids: list[str] = Field(default_factory=list)
@@ -168,6 +273,7 @@ class RagEvaluationResultRecord(BaseModel):
 
 class RagEvaluationRunRecord(BaseModel):
     run_id: str
+    organization_id: str
     comparison_id: str
     dataset_id: str
     dataset_name: str
@@ -280,6 +386,7 @@ class MCPToolDefinition(BaseModel):
 
 class MCPExecutionRecord(BaseModel):
     execution_id: str
+    organization_id: str
     tool_name: str
     requested_by: str
     required_scope: str
@@ -404,6 +511,7 @@ class AgentWorkflowRequest(BaseModel):
 
 class WorkflowActionRecord(BaseModel):
     action_instance_id: str
+    organization_id: str
     workflow_id: str
     sequence: int
     action_type: str
@@ -437,6 +545,7 @@ class WorkflowActionRecord(BaseModel):
 
 class AgentWorkflowRecord(BaseModel):
     workflow_id: str
+    organization_id: str
     prompt: str
     requested_by: str
     status: Literal[
