@@ -19,6 +19,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Google Drive OAuth browsing and selected-file import into the document library
 - Policy evaluation, job monitoring, approvals, connector status, and audit visibility in the React UI
 - Persistent RAG, embedding, and MCP runtime telemetry with latency, reliability, and cost summaries
+- Persistent RAG evaluation datasets with local-versus-OpenAI quality comparisons
 - Daily or monthly cost budgets with warning thresholds and preflight enforcement for priced providers
 - Alembic migrations and automated Docker verification
 - GitHub Actions checks for backend tests, migration round trips, frontend builds, and dependency audits
@@ -39,6 +40,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Security MCP server exposed through Streamable HTTP
 - OAuth connector framework with a working Google Drive file flow
 - Runtime observability ledger and configurable provider-cost budgets
+- Curated RAG quality evaluation with per-case evidence and latency results
 
 ### Data and infrastructure
 
@@ -186,6 +188,28 @@ APP_VECTOR_DIMENSIONS=384
 ```
 
 The configured OpenAI model receives a request for 384 output dimensions to match the pgvector schema. Re-index uploaded documents after changing the embedding provider or vector dimensions.
+
+## RAG quality evaluation
+
+Admins and managers can create persistent evaluation datasets from accessible, prompt-safe document chunks. Each answerable case declares expected document or chunk IDs, evidence facts, and a reference answer; unanswerable control cases declare no expected evidence. Dataset settings control corpus document IDs, top-K retrieval, and the minimum similarity score.
+
+The RAG Quality Evaluation dashboard runs the same dataset against local and OpenAI embeddings without re-indexing or modifying stored documents. Each provider run records:
+
+- retrieval accuracy from expected evidence recall
+- citation correctness from the precision of returned citations
+- groundedness from expected facts supported by retrieved excerpts
+- a hallucination proxy that flags unsupported citations and citations on unanswerable cases
+- average, P95, and corpus-index embedding latency
+
+OpenAI comparisons use the configured model and cost-budget enforcement. If `OPENAI_API_KEY` is absent, the OpenAI run is persisted as `skipped` while the local run still completes. Evaluation corpora are bounded by `APP_RAG_EVALUATION_MAX_CHUNKS`, which defaults to 500.
+
+```text
+GET  /api/rag-evaluations/datasets
+POST /api/rag-evaluations/datasets
+POST /api/rag-evaluations/datasets/{dataset_id}/runs
+GET  /api/rag-evaluations/runs
+GET  /api/rag-evaluations/runs/{run_id}
+```
 
 ## Runtime governance and cost budgets
 

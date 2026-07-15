@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class UserContext(BaseModel):
@@ -72,6 +72,127 @@ class RagQuery(BaseModel):
 class RagAnswer(BaseModel):
     answer: str
     citations: list[Citation]
+
+
+class RagEvaluationCaseCreate(BaseModel):
+    question: str = Field(min_length=3, max_length=2_000)
+    expected_document_ids: list[str] = Field(default_factory=list, max_length=20)
+    expected_chunk_ids: list[str] = Field(default_factory=list, max_length=50)
+    expected_facts: list[str] = Field(default_factory=list, max_length=20)
+    reference_answer: str = Field(default="", max_length=5_000)
+    unanswerable: bool = False
+
+    @model_validator(mode="after")
+    def validate_expectations(self) -> "RagEvaluationCaseCreate":
+        if self.unanswerable:
+            if self.expected_document_ids or self.expected_chunk_ids or self.expected_facts:
+                raise ValueError("Unanswerable cases cannot declare expected evidence.")
+            return self
+        if not self.expected_document_ids and not self.expected_chunk_ids:
+            raise ValueError(
+                "Answerable cases require an expected document or chunk identifier."
+            )
+        if not self.expected_facts:
+            raise ValueError("Answerable cases require at least one expected fact.")
+        if not self.reference_answer.strip():
+            raise ValueError("Answerable cases require a reference answer.")
+        return self
+
+
+class RagEvaluationDatasetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2_000)
+    document_ids: list[str] = Field(default_factory=list, max_length=50)
+    top_k: int = Field(default=3, ge=1, le=10)
+    minimum_score: float = Field(default=0.0, ge=-1.0, le=1.0)
+    cases: list[RagEvaluationCaseCreate] = Field(min_length=1, max_length=100)
+
+
+class RagEvaluationCaseRecord(RagEvaluationCaseCreate):
+    case_id: str
+    dataset_id: str
+    position: int
+
+
+class RagEvaluationDatasetRecord(BaseModel):
+    dataset_id: str
+    name: str
+    description: str
+    document_ids: list[str] = Field(default_factory=list)
+    top_k: int
+    minimum_score: float
+    created_by: str
+    case_count: int
+    cases: list[RagEvaluationCaseRecord] = Field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class RagEvaluationRunRequest(BaseModel):
+    providers: list[Literal["local", "openai"]] = Field(
+        default_factory=lambda: ["local"],
+        min_length=1,
+        max_length=2,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_providers(self) -> "RagEvaluationRunRequest":
+        if len(set(self.providers)) != len(self.providers):
+            raise ValueError("Each embedding provider may be selected only once.")
+        return self
+
+
+class RagEvaluationCitation(BaseModel):
+    document_id: str
+    chunk_id: str
+    title: str
+    excerpt: str
+    score: float
+    expected: bool
+
+
+class RagEvaluationResultRecord(BaseModel):
+    result_id: str
+    run_id: str
+    case_id: str
+    question: str
+    citations: list[RagEvaluationCitation] = Field(default_factory=list)
+    retrieval_accuracy: float
+    citation_correctness: float
+    groundedness: float
+    hallucination_detected: bool
+    latency_ms: float
+    error: str | None = None
+    created_at: str | None = None
+
+
+class RagEvaluationRunRecord(BaseModel):
+    run_id: str
+    comparison_id: str
+    dataset_id: str
+    dataset_name: str
+    provider: Literal["local", "openai"]
+    model: str
+    status: Literal["running", "completed", "failed", "skipped"]
+    case_count: int
+    retrieval_accuracy: float
+    citation_correctness: float
+    groundedness: float
+    hallucination_rate: float
+    average_latency_ms: float
+    p95_latency_ms: float
+    index_latency_ms: float
+    error: str | None = None
+    created_by: str
+    results: list[RagEvaluationResultRecord] = Field(default_factory=list)
+    created_at: str | None = None
+    completed_at: str | None = None
+
+
+class RagEvaluationComparison(BaseModel):
+    comparison_id: str
+    dataset_id: str
+    runs: list[RagEvaluationRunRecord]
 
 
 class ActionProposal(BaseModel):

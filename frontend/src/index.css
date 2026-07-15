@@ -169,6 +169,80 @@ h2 {
     linear-gradient(145deg, #ffffff 0%, #f6f9fc 100%);
 }
 
+.evaluation-console {
+  border-color: #a9bca4;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(79, 122, 65, 0.13), transparent 34%),
+    linear-gradient(145deg, #ffffff 0%, #f7faf5 100%);
+}
+
+.evaluation-layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 1.35fr) minmax(280px, 0.65fr);
+  gap: 16px;
+}
+
+.evaluation-form {
+  border-right: 1px solid #d8e3d4;
+  padding-right: 16px;
+}
+
+.evaluation-cases {
+  min-height: 260px;
+}
+
+.evaluation-datasets {
+  max-height: 500px;
+}
+
+.evaluation-runs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px;
+  border-top: 1px solid #d8e3d4;
+  padding-top: 14px;
+}
+
+.evaluation-run-card {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #d3dfcf;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.86);
+  padding: 12px;
+}
+
+.evaluation-run-card .execution-title > div {
+  display: grid;
+  gap: 4px;
+}
+
+.evaluation-run-card em {
+  color: #923f2e;
+  font-style: normal;
+}
+
+.quality-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.quality-metrics span {
+  display: grid;
+  gap: 2px;
+  border-radius: 5px;
+  background: #edf4ea;
+  color: #4b6045;
+  padding: 7px;
+  font-size: 0.75rem;
+}
+
+.quality-metrics strong {
+  color: #315c2b;
+  font-size: 0.95rem;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -601,6 +675,7 @@ h2 {
   .columns,
   .metric-grid,
   .governance-grid,
+  .evaluation-layout,
   .mcp-runner,
   .split,
   .split.three {

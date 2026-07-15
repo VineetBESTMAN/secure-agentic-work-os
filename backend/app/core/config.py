@@ -75,6 +75,12 @@ class Settings(BaseSettings):
         default=5.0,
         validation_alias="APP_DEFAULT_DAILY_COST_LIMIT_USD",
     )
+    rag_evaluation_max_chunks: int = Field(
+        default=500,
+        ge=1,
+        le=10_000,
+        validation_alias="APP_RAG_EVALUATION_MAX_CHUNKS",
+    )
     oauth_redirect_base_url: str = Field(
         default="http://127.0.0.1:8000/api/connectors",
         validation_alias="APP_OAUTH_REDIRECT_BASE_URL",

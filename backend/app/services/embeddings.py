@@ -16,15 +16,17 @@ OPENAI_DIMENSIONALITY_MODELS = ("text-embedding-3",)
 
 
 class EmbeddingService:
-    def embed(self, text: str) -> list[float]:
-        return self.embed_many([text])[0]
+    def embed(self, text: str, provider: str | None = None) -> list[float]:
+        return self.embed_many([text], provider=provider)[0]
 
-    def embed_many(self, texts: list[str]) -> list[list[float]]:
+    def embed_many(
+        self, texts: list[str], provider: str | None = None
+    ) -> list[list[float]]:
         settings = get_settings()
         if not texts:
             return []
 
-        provider = settings.embedding_provider.lower().strip()
+        provider = (provider or settings.embedding_provider).lower().strip()
         model = (
             settings.openai_embedding_model
             if provider == "openai"
@@ -81,6 +83,28 @@ class EmbeddingService:
             },
         )
         return vectors
+
+    def model_for_provider(self, provider: str) -> str:
+        settings = get_settings()
+        normalized = provider.lower().strip()
+        if normalized == "local":
+            return f"local-hash-{settings.vector_dimensions}d"
+        if normalized == "openai":
+            return settings.openai_embedding_model
+        raise ValueError("Embedding provider must be 'local' or 'openai'.")
+
+    def provider_unavailable_reason(self, provider: str) -> str | None:
+        normalized = provider.lower().strip()
+        if normalized == "local":
+            return None
+        if normalized != "openai":
+            return "Embedding provider must be 'local' or 'openai'."
+        settings = get_settings()
+        if not (settings.openai_api_key or "").strip():
+            return "OPENAI_API_KEY is not configured."
+        if OpenAI is None:
+            return "The openai package is not installed."
+        return None
 
     def _local_embed(self, text: str, dimensions: int) -> list[float]:
         vector = [0.0] * dimensions

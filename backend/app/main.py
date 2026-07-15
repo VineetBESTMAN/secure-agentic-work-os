@@ -3,7 +3,20 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import agent, approvals, audit, auth, connectors, documents, health, jobs, mcp, observability, policies
+from app.api.routes import (
+    agent,
+    approvals,
+    audit,
+    auth,
+    connectors,
+    documents,
+    health,
+    jobs,
+    mcp,
+    observability,
+    policies,
+    rag_evaluations,
+)
 from app.core.config import get_settings
 from app.core.migrations import upgrade_database
 from app.services.approval import approval_service
@@ -55,4 +68,5 @@ app.include_router(connectors.router, prefix="/api")
 app.include_router(policies.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(observability.router, prefix="/api")
+app.include_router(rag_evaluations.router, prefix="/api")
 app.mount("/protocol", security_mcp_http_app)

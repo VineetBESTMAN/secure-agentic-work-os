@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import {
   Activity,
+  BarChart3,
   Bot,
   CheckCircle2,
   ClipboardList,
@@ -9,6 +10,7 @@ import {
   Eye,
   FileUp,
   Plug,
+  Play,
   RefreshCw,
   RotateCcw,
   Save,
@@ -229,6 +231,38 @@ type RuntimeSummary = {
   }[];
 };
 
+type RagEvaluationDataset = {
+  dataset_id: string;
+  name: string;
+  description: string;
+  document_ids: string[];
+  top_k: number;
+  minimum_score: number;
+  created_by: string;
+  case_count: number;
+  created_at: string | null;
+};
+
+type RagEvaluationRun = {
+  run_id: string;
+  comparison_id: string;
+  dataset_id: string;
+  dataset_name: string;
+  provider: "local" | "openai";
+  model: string;
+  status: "running" | "completed" | "failed" | "skipped";
+  case_count: number;
+  retrieval_accuracy: number;
+  citation_correctness: number;
+  groundedness: number;
+  hallucination_rate: number;
+  average_latency_ms: number;
+  p95_latency_ms: number;
+  index_latency_ms: number;
+  error: string | null;
+  created_at: string | null;
+};
+
 const MCP_ARGUMENT_TEMPLATES: Record<string, Record<string, unknown>> = {
   search_documents: { question: "What requires manager approval?" },
   create_task: {
@@ -243,6 +277,29 @@ const MCP_ARGUMENT_TEMPLATES: Record<string, Record<string, unknown>> = {
   },
   export_data: { classification: "internal", limit: 25 },
 };
+
+const DEFAULT_EVALUATION_CASES = JSON.stringify(
+  [
+    {
+      question: "What fact should be retrieved from the selected document?",
+      expected_document_ids: ["replace-with-document-id"],
+      expected_chunk_ids: [],
+      expected_facts: ["replace with an evidence phrase from the document"],
+      reference_answer: "Replace with the expected grounded answer.",
+      unanswerable: false,
+    },
+    {
+      question: "Ask a deliberately unanswerable control question.",
+      expected_document_ids: [],
+      expected_chunk_ids: [],
+      expected_facts: [],
+      reference_answer: "",
+      unanswerable: true,
+    },
+  ],
+  null,
+  2,
+);
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -270,6 +327,16 @@ export default function App() {
   const [mcpTools, setMcpTools] = useState<MCPToolDefinition[]>([]);
   const [mcpExecutions, setMcpExecutions] = useState<MCPExecutionRecord[]>([]);
   const [runtimeSummary, setRuntimeSummary] = useState<RuntimeSummary | null>(null);
+  const [evaluationDatasets, setEvaluationDatasets] = useState<RagEvaluationDataset[]>([]);
+  const [evaluationRuns, setEvaluationRuns] = useState<RagEvaluationRun[]>([]);
+  const [evaluationName, setEvaluationName] = useState("RAG quality baseline");
+  const [evaluationDescription, setEvaluationDescription] = useState(
+    "Curated retrieval, citation, groundedness, and hallucination regression cases.",
+  );
+  const [evaluationDocumentIds, setEvaluationDocumentIds] = useState("");
+  const [evaluationTopK, setEvaluationTopK] = useState(3);
+  const [evaluationMinimumScore, setEvaluationMinimumScore] = useState(0);
+  const [evaluationCases, setEvaluationCases] = useState(DEFAULT_EVALUATION_CASES);
   const [selectedMcpTool, setSelectedMcpTool] = useState("search_documents");
   const [mcpArguments, setMcpArguments] = useState(
     JSON.stringify(MCP_ARGUMENT_TEMPLATES.search_documents, null, 2),
@@ -331,6 +398,10 @@ export default function App() {
       setPolicies(await api<PolicyRecord[]>("/api/policies"));
       setJobs(await api<JobRecord[]>("/api/jobs"));
       setRuntimeSummary(await api<RuntimeSummary>("/api/observability/summary?hours=24"));
+      setEvaluationDatasets(
+        await api<RagEvaluationDataset[]>("/api/rag-evaluations/datasets"),
+      );
+      setEvaluationRuns(await api<RagEvaluationRun[]>("/api/rag-evaluations/runs?limit=50"));
     }
   }
 
@@ -703,6 +774,68 @@ export default function App() {
     }
   }
 
+  async function createEvaluationDataset(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      const cases = JSON.parse(evaluationCases) as unknown;
+      if (!Array.isArray(cases)) {
+        throw new SyntaxError("Evaluation cases must be a JSON array.");
+      }
+      const documentIds = evaluationDocumentIds
+        .split(/[\n,]/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const dataset = await api<RagEvaluationDataset>("/api/rag-evaluations/datasets", {
+        method: "POST",
+        body: JSON.stringify({
+          name: evaluationName,
+          description: evaluationDescription,
+          document_ids: documentIds,
+          top_k: evaluationTopK,
+          minimum_score: evaluationMinimumScore,
+          cases,
+        }),
+      });
+      setMessage(`Created evaluation dataset ${dataset.name} with ${dataset.case_count} cases.`);
+      await refreshAll();
+    } catch (error) {
+      setMessage(
+        error instanceof SyntaxError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Could not create evaluation dataset",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runEvaluation(datasetId: string) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const comparison = await api<{
+        comparison_id: string;
+        runs: RagEvaluationRun[];
+      }>(`/api/rag-evaluations/datasets/${datasetId}/runs`, {
+        method: "POST",
+        body: JSON.stringify({ providers: ["local", "openai"] }),
+      });
+      const outcomes = comparison.runs
+        .map((run) => `${run.provider}: ${run.status}`)
+        .join(", ");
+      setMessage(`Evaluation ${comparison.comparison_id} completed (${outcomes}).`);
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "RAG evaluation failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function logout() {
     setToken("");
     setUser(null);
@@ -1013,6 +1146,148 @@ export default function App() {
           </section>
         )}
 
+        {(user?.role === "admin" || user?.role === "manager") && (
+          <section className="panel evaluation-console">
+            <div className="panel-title console-heading">
+              <div>
+                <BarChart3 size={20} />
+                <div>
+                  <h2>RAG Quality Evaluation</h2>
+                  <small>
+                    Persistent retrieval, citation, groundedness, hallucination, and latency tests
+                  </small>
+                </div>
+              </div>
+              <span className="protocol-badge">Local vs OpenAI</span>
+            </div>
+
+            <div className="evaluation-layout">
+              <form className="stack evaluation-form" onSubmit={createEvaluationDataset}>
+                <div className="panel-title">
+                  <Save size={17} />
+                  <h2>Create Dataset</h2>
+                </div>
+                <div className="split">
+                  <label>
+                    Name
+                    <input
+                      value={evaluationName}
+                      onChange={(event) => setEvaluationName(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Corpus document IDs
+                    <input
+                      value={evaluationDocumentIds}
+                      onChange={(event) => setEvaluationDocumentIds(event.target.value)}
+                      placeholder="Comma-separated; blank uses all accessible documents"
+                    />
+                  </label>
+                </div>
+                <label>
+                  Description
+                  <input
+                    value={evaluationDescription}
+                    onChange={(event) => setEvaluationDescription(event.target.value)}
+                  />
+                </label>
+                <div className="split">
+                  <label>
+                    Top K
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={evaluationTopK}
+                      onChange={(event) => setEvaluationTopK(Number(event.target.value))}
+                    />
+                  </label>
+                  <label>
+                    Minimum similarity
+                    <input
+                      type="number"
+                      min={-1}
+                      max={1}
+                      step={0.05}
+                      value={evaluationMinimumScore}
+                      onChange={(event) => setEvaluationMinimumScore(Number(event.target.value))}
+                    />
+                  </label>
+                </div>
+                <label>
+                  Cases JSON
+                  <textarea
+                    className="code-input evaluation-cases"
+                    value={evaluationCases}
+                    onChange={(event) => setEvaluationCases(event.target.value)}
+                  />
+                </label>
+                <small>
+                  Answerable cases require expected evidence, facts, and a reference answer.
+                  Unanswerable cases must leave those fields empty.
+                </small>
+                <button type="submit" disabled={busy || !evaluationName.trim()}>
+                  <Save size={16} />
+                  Save evaluation dataset
+                </button>
+              </form>
+
+              <div className="stack">
+                <div className="panel-title">
+                  <Database size={17} />
+                  <h2>Datasets</h2>
+                </div>
+                <div className="item-list evaluation-datasets">
+                  {evaluationDatasets.map((dataset) => (
+                    <article key={dataset.dataset_id} className="item">
+                      <strong>{dataset.name}</strong>
+                      <span>{dataset.description || "No description"}</span>
+                      <small>
+                        {dataset.case_count} cases | top {dataset.top_k} | score &gt; {dataset.minimum_score}
+                      </small>
+                      <code>{dataset.dataset_id}</code>
+                      <button type="button" onClick={() => runEvaluation(dataset.dataset_id)} disabled={busy}>
+                        <Play size={16} />
+                        Compare local and OpenAI
+                      </button>
+                    </article>
+                  ))}
+                  {evaluationDatasets.length === 0 && (
+                    <p className="empty">Create a curated dataset to establish a quality baseline.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="evaluation-runs">
+              {evaluationRuns.slice(0, 12).map((run) => (
+                <article key={run.run_id} className="evaluation-run-card">
+                  <div className="execution-title">
+                    <div>
+                      <strong>{run.dataset_name}</strong>
+                      <small>{run.provider} / {run.model}</small>
+                    </div>
+                    <span className={`status-pill status-${run.status}`}>{run.status}</span>
+                  </div>
+                  <div className="quality-metrics">
+                    <span><strong>{run.retrieval_accuracy.toFixed(1)}%</strong> retrieval</span>
+                    <span><strong>{run.citation_correctness.toFixed(1)}%</strong> citations</span>
+                    <span><strong>{run.groundedness.toFixed(1)}%</strong> grounded</span>
+                    <span><strong>{run.hallucination_rate.toFixed(1)}%</strong> hallucination</span>
+                  </div>
+                  <small>
+                    {run.average_latency_ms.toFixed(1)} ms average | {run.p95_latency_ms.toFixed(1)} ms P95 | {run.case_count} cases
+                  </small>
+                  {run.error && <em>{run.error}</em>}
+                </article>
+              ))}
+              {evaluationRuns.length === 0 && (
+                <p className="empty">No evaluation runs recorded yet.</p>
+              )}
+            </div>
+          </section>
+        )}
+
         <section className="columns">
           <section className="panel">
             <div className="panel-title">
@@ -1023,6 +1298,7 @@ export default function App() {
               {documents.map((document) => (
                 <article key={document.document_id} className="item">
                   <strong>{document.title}</strong>
+                  <code>{document.document_id}</code>
                   <span>{document.summary}</span>
                   <small>
                     {document.classification} | {document.owner_team} | {document.chunk_count} chunks
