@@ -34,7 +34,12 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     assert "rag_evaluation_cases" in tables
     assert "rag_evaluation_runs" in tables
     assert "rag_evaluation_results" in tables
-    assert revision == ("20260715_0005",)
+    assert "organizations" in tables
+    assert "organization_memberships" in tables
+    assert "organization_invitations" in tables
+    assert "auth_sessions" in tables
+    assert "oidc_providers" in tables
+    assert revision == ("20260715_0006",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -49,7 +54,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert revision == ("20260715_0005",)
+    assert revision == ("20260715_0006",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -140,11 +145,23 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
             ORDER BY sequence
             """
         ).fetchall()
+        organization = connection.execute(
+            "SELECT organization_id, slug FROM organizations WHERE organization_id = 'org_default'"
+        ).fetchone()
+        membership = connection.execute(
+            "SELECT organization_id, user_id, role FROM organization_memberships WHERE user_id = 'existing-user'"
+        ).fetchone()
+        workflow_tenant = connection.execute(
+            "SELECT organization_id FROM agent_workflows WHERE workflow_id = 'wf_existing'"
+        ).fetchone()
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260715_0005",)
+    assert revision == ("20260715_0006",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
         (1, "create_task", "pending"),
     ]
+    assert organization == ("org_default", "default")
+    assert membership == ("org_default", "existing-user", "admin")
+    assert workflow_tenant == ("org_default",)

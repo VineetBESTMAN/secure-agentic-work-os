@@ -6,7 +6,9 @@ The application runs locally with Docker Compose and supports testing with real 
 
 ## Implemented capabilities
 
-- JWT authentication with `admin`, `manager`, and `employee` roles
+- Organization-aware authentication with rotating refresh sessions and live membership checks
+- Organizations, invitations, real user onboarding, tenant-scoped memberships, and stronger RBAC
+- Optional per-organization OIDC/SSO with discovery, PKCE, nonce validation, and encrypted client secrets
 - Persistent document uploads for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
 - Extraction, chunking, embeddings, semantic search, and cited RAG answers
 - PostgreSQL with `pgvector` and HNSW indexing, plus a SQLite fallback for local development
@@ -30,7 +32,7 @@ The application runs locally with Docker Compose and supports testing with real 
 
 - React 19, TypeScript, and Vite
 - Responsive operations dashboard for documents, search, workflows, approvals, connectors, jobs, MCP tools, and audit events
-- Live API integration with JWT-authenticated requests
+- Live API integration with automatic access-token refresh and organization switching
 
 ### Backend
 
@@ -41,6 +43,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - OAuth connector framework with a working Google Drive file flow
 - Runtime observability ledger and configurable provider-cost budgets
 - Curated RAG quality evaluation with per-case evidence and latency results
+- Tenant isolation across documents, workflows, MCP, approvals, connectors, jobs, policies, audit, telemetry, budgets, and RAG evaluations
 
 ### Data and infrastructure
 
@@ -124,7 +127,11 @@ Uploaded content, extracted chunks, workflows, jobs, approvals, and audit record
 
 ## Security model
 
-- Roles and JWT scopes restrict API and MCP operations.
+- Roles and scopes come from the active organization membership and are revalidated on every API and MCP request.
+- Access tokens are bound to a server-side session and membership. Refresh tokens are stored only as SHA-256 hashes, rotated on use, and invalidated on logout.
+- Suspending a membership immediately blocks its existing sessions; organization switches issue a separately bound session.
+- Invitations are single-use, expire automatically, store only a token hash, and require an existing user to confirm their current password.
+- Every tenant-owned record carries an organization boundary, and service queries enforce it before role-level visibility rules.
 - Policy checks separate an agent's proposed action from actual tool execution.
 - High-risk email and export operations require a separate manager approval.
 - Requesters cannot approve their own actions.
@@ -134,6 +141,20 @@ Uploaded content, extracted chunks, workflows, jobs, approvals, and audit record
 - Security-relevant activity is recorded in the audit log.
 
 Email delivery is intentionally simulated. The application does not send an external email during the approval demo.
+
+## Organizations, invitations, and SSO
+
+Every user can belong to multiple organizations with a separate role and scope set in each. Use the Organization & Identity panel to create a workspace and switch the active tenant. Admins can invite users, suspend or reactivate memberships, and configure an optional OIDC provider. Managers can inspect members and invitation status without changing membership security.
+
+New users accept an invitation with a display name and a password of at least 12 characters. Existing users enter their current password when accepting an invitation for another organization. The invitation response exposes the raw token once so it can be delivered through a secure channel; only its hash is persisted.
+
+OIDC sign-in is opt-in per organization. Register this callback pattern with the identity provider:
+
+```text
+http://127.0.0.1:8000/api/auth/oidc/{provider_id}/callback
+```
+
+The authorization flow uses discovery, authorization-code PKCE, a single-use hashed state, nonce checking, issuer/audience/signature validation, and a verified email that must already have an active organization membership. Configure the public callback base with `APP_OIDC_REDIRECT_BASE_URL`.
 
 ## Security MCP server
 

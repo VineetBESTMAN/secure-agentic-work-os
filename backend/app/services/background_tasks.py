@@ -26,6 +26,7 @@ class BackgroundTaskService:
         classification: str,
         owner_team: str,
         uploaded_by: str,
+        organization_id: str = "org_default",
     ) -> JobRecord:
         safe_filename = Path(filename).name or "uploaded-document.txt"
         job = job_service.create(
@@ -37,6 +38,7 @@ class BackgroundTaskService:
                 "size_bytes": len(data),
             },
             created_by=uploaded_by,
+            organization_id=organization_id,
         )
         staged_path = self._staging_path(job.job_id, safe_filename)
         staged_path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,22 +54,30 @@ class BackgroundTaskService:
                     classification,
                     owner_team,
                     uploaded_by,
+                    organization_id,
                 ),
             )
         except BackgroundQueueError:
             staged_path.unlink(missing_ok=True)
             raise
 
-    def enqueue_reindex(self, document_id: str, role: str, requested_by: str) -> JobRecord:
+    def enqueue_reindex(
+        self,
+        document_id: str,
+        role: str,
+        requested_by: str,
+        organization_id: str = "org_default",
+    ) -> JobRecord:
         job = job_service.create(
             job_type="document.reindex",
             detail={"document_id": document_id},
             created_by=requested_by,
+            organization_id=organization_id,
         )
         return self._dispatch(
             job=job,
             task=reindex_document_task,
-            args=(job.job_id, document_id, role),
+            args=(job.job_id, document_id, role, organization_id),
         )
 
     def enqueue_connector_items(
@@ -75,17 +85,19 @@ class BackgroundTaskService:
         provider: str,
         items: list[ConnectorImportItem],
         requested_by: str,
+        organization_id: str = "org_default",
     ) -> JobRecord:
         serialized_items = [item.model_dump() for item in items]
         job = job_service.create(
             job_type=f"{provider}.import",
             detail={"provider": provider, "items": len(items)},
             created_by=requested_by,
+            organization_id=organization_id,
         )
         return self._dispatch(
             job=job,
             task=ingest_connector_items_task,
-            args=(job.job_id, serialized_items, requested_by),
+            args=(job.job_id, serialized_items, requested_by, organization_id),
         )
 
     def _dispatch(self, job: JobRecord, task: Any, args: tuple[Any, ...]) -> JobRecord:

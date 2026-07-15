@@ -111,6 +111,75 @@ try {
         throw "Async connector import smoke test did not complete successfully: $($importJob.status)"
     }
 
+    $organizations = Invoke-RestMethod `
+        -Method Get `
+        -Uri "http://127.0.0.1:8000/api/organizations" `
+        -Headers $headers
+    $verificationOrganization = $organizations | `
+        Where-Object { $_.slug -eq "docker-verification" } | `
+        Select-Object -First 1
+    if (-not $verificationOrganization) {
+        $organizationBody = @{
+            name = "Docker Verification"
+            slug = "docker-verification"
+        } | ConvertTo-Json
+        $verificationOrganization = Invoke-RestMethod `
+            -Method Post `
+            -Uri "http://127.0.0.1:8000/api/organizations" `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $organizationBody
+    }
+    $switchBody = @{
+        organization_id = $verificationOrganization.organization_id
+    } | ConvertTo-Json
+    $tenantSession = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/auth/switch-organization" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $switchBody
+    $tenantHeaders = @{ Authorization = "Bearer $($tenantSession.access_token)" }
+    $tenantDocuments = Invoke-RestMethod `
+        -Method Get `
+        -Uri "http://127.0.0.1:8000/api/documents/library" `
+        -Headers $tenantHeaders
+    $smokeDocumentId = $importJob.result.document_ids[0]
+    if ($tenantDocuments.document_id -contains $smokeDocumentId) {
+        throw "A default-organization document crossed the Docker tenant boundary."
+    }
+    $tenantPolicies = Invoke-RestMethod `
+        -Method Get `
+        -Uri "http://127.0.0.1:8000/api/policies" `
+        -Headers $tenantHeaders
+    if ($tenantPolicies.Count -lt 3) {
+        throw "The Docker verification organization was not seeded with governance policies."
+    }
+    $refreshBody = @{
+        refresh_token = $tenantSession.refresh_token
+    } | ConvertTo-Json
+    $rotatedSession = Invoke-RestMethod `
+        -Method Post `
+        -Uri "http://127.0.0.1:8000/api/auth/refresh" `
+        -ContentType "application/json" `
+        -Body $refreshBody
+    if (-not $rotatedSession.access_token) {
+        throw "Refresh-token rotation did not return a new access token."
+    }
+    try {
+        Invoke-RestMethod `
+            -Method Post `
+            -Uri "http://127.0.0.1:8000/api/auth/refresh" `
+            -ContentType "application/json" `
+            -Body $refreshBody | Out-Null
+        throw "A used refresh token was accepted a second time."
+    }
+    catch {
+        if ($_.Exception.Response.StatusCode.value__ -ne 401) {
+            throw
+        }
+    }
+
     $queryBody = @{
         question = "What approval is required for the Acme renewal?"
     } | ConvertTo-Json
@@ -227,7 +296,7 @@ try {
         throw "Approval did not resume and complete the agent workflow."
     }
 
-    Write-Host "Backend API, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
+    Write-Host "Backend API, tenant isolation, session rotation, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
     Wait-Http -Url "http://127.0.0.1:5173" -Name "Frontend preview"
     Write-Host "Docker stack verification passed."
     Write-Host "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

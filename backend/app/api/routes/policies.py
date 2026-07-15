@@ -16,8 +16,9 @@ def list_policies(user=Depends(get_current_user)) -> list[PolicyRecord]:
         actor_id=user.user_id,
         event_type="policies.list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
-    return policy_service.list_policies()
+    return policy_service.list_policies(user.organization_id)
 
 
 @router.post("", response_model=PolicyRecord)
@@ -26,10 +27,11 @@ def create_policy(
     user=Depends(get_current_user),
 ) -> PolicyRecord:
     require_roles(user.role, allowed_roles={"admin"})
-    policy = policy_service.create_policy(payload)
+    policy = policy_service.create_policy(payload, user.organization_id)
     audit_service.record(
         actor_id=user.user_id,
         event_type="policies.create",
         detail={"policy_id": policy.policy_id, "rule_type": policy.rule_type},
+        organization_id=user.organization_id,
     )
     return policy

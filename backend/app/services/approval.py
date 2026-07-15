@@ -10,26 +10,31 @@ class ApprovalService:
         if is_postgres_database():
             insert_sql = """
                 INSERT INTO approval_requests
-                    (approval_id, action_id, requested_by, status)
-                VALUES (?, ?, ?, ?)
+                    (approval_id, action_id, requested_by, status, organization_id)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (approval_id) DO NOTHING
             """
         else:
             insert_sql = """
                 INSERT OR IGNORE INTO approval_requests
-                    (approval_id, action_id, requested_by, status)
-                VALUES (?, ?, ?, ?)
+                    (approval_id, action_id, requested_by, status, organization_id)
+                VALUES (?, ?, ?, ?, ?)
             """
 
         with get_connection() as connection:
             connection.execute(
                 insert_sql,
-                ("apr_demo_1", "act_send_email", "u_employee", "pending"),
+                ("apr_demo_1", "act_send_email", "u_employee", "pending", "org_default"),
             )
 
-    def list_requests(self, requested_by: str | None = None) -> list[ApprovalRecord]:
-        where_clause = "WHERE requested_by = ?" if requested_by else ""
-        params = (requested_by,) if requested_by else ()
+    def list_requests(
+        self, organization_id: str = "org_default", requested_by: str | None = None
+    ) -> list[ApprovalRecord]:
+        where_clause = "WHERE organization_id = ?"
+        params: tuple[object, ...] = (organization_id,)
+        if requested_by:
+            where_clause += " AND requested_by = ?"
+            params += (requested_by,)
         with get_connection() as connection:
             rows = connection.execute(
                 f"""
@@ -48,6 +53,7 @@ class ApprovalService:
         requested_by: str,
         execution_id: str | None = None,
         arguments_hash: str | None = None,
+        organization_id: str = "org_default",
     ) -> ApprovalRecord:
         record = ApprovalRecord(
             approval_id=f"apr_{uuid4().hex}",
@@ -63,9 +69,9 @@ class ApprovalService:
                 INSERT INTO approval_requests
                     (
                         approval_id, action_id, requested_by, status, created_at,
-                        execution_id, arguments_hash
+                        execution_id, arguments_hash, organization_id
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.approval_id,
@@ -75,27 +81,34 @@ class ApprovalService:
                     record.created_at.isoformat(),
                     record.execution_id,
                     record.arguments_hash,
+                    organization_id,
                 ),
             )
         return record
 
-    def get(self, approval_id: str) -> ApprovalRecord | None:
+    def get(
+        self, approval_id: str, organization_id: str = "org_default"
+    ) -> ApprovalRecord | None:
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM approval_requests WHERE approval_id = ?",
-                (approval_id,),
+                "SELECT * FROM approval_requests WHERE approval_id = ? AND organization_id = ?",
+                (approval_id, organization_id),
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
     def decide(
-        self, approval_id: str, approved: bool, reviewer_id: str
+        self,
+        approval_id: str,
+        approved: bool,
+        reviewer_id: str,
+        organization_id: str = "org_default",
     ) -> ApprovalRecord | None:
         status = "approved" if approved else "rejected"
         reviewed_at = datetime.now(timezone.utc).isoformat()
         with get_connection() as connection:
             existing = connection.execute(
-                "SELECT * FROM approval_requests WHERE approval_id = ?",
-                (approval_id,),
+                "SELECT * FROM approval_requests WHERE approval_id = ? AND organization_id = ?",
+                (approval_id, organization_id),
             ).fetchone()
             if existing is None:
                 return None
@@ -107,20 +120,23 @@ class ApprovalService:
                 """
                 UPDATE approval_requests
                 SET status = ?, reviewed_by = ?, reviewed_at = ?
-                WHERE approval_id = ? AND status = 'pending'
+                WHERE approval_id = ? AND organization_id = ? AND status = 'pending'
                 """,
-                (status, reviewer_id, reviewed_at, approval_id),
+                (status, reviewer_id, reviewed_at, approval_id, organization_id),
             )
             row = connection.execute(
-                "SELECT * FROM approval_requests WHERE approval_id = ?",
-                (approval_id,),
+                "SELECT * FROM approval_requests WHERE approval_id = ? AND organization_id = ?",
+                (approval_id, organization_id),
             ).fetchone()
         if row is None:
             return None
         return self._row_to_record(row)
 
     def cancel_for_execution(
-        self, execution_id: str, cancelled_by: str
+        self,
+        execution_id: str,
+        cancelled_by: str,
+        organization_id: str = "org_default",
     ) -> ApprovalRecord | None:
         reviewed_at = datetime.now(timezone.utc).isoformat()
         with get_connection() as connection:
@@ -128,13 +144,13 @@ class ApprovalService:
                 """
                 UPDATE approval_requests
                 SET status = 'rejected', reviewed_by = ?, reviewed_at = ?
-                WHERE execution_id = ? AND status = 'pending'
+                WHERE execution_id = ? AND organization_id = ? AND status = 'pending'
                 """,
-                (cancelled_by, reviewed_at, execution_id),
+                (cancelled_by, reviewed_at, execution_id, organization_id),
             )
             row = connection.execute(
-                "SELECT * FROM approval_requests WHERE execution_id = ?",
-                (execution_id,),
+                "SELECT * FROM approval_requests WHERE execution_id = ? AND organization_id = ?",
+                (execution_id, organization_id),
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 

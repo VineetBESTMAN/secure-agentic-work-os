@@ -32,7 +32,7 @@ class WorkflowService:
         with get_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT workflow_id, plan_json
+                SELECT workflow_id, plan_json, organization_id
                 FROM agent_workflows AS workflow
                 WHERE NOT EXISTS (
                     SELECT 1
@@ -49,7 +49,13 @@ class WorkflowService:
             except (TypeError, ValueError):
                 continue
             with get_connection() as connection:
-                self._insert_actions(connection, row["workflow_id"], plan, self._now())
+                self._insert_actions(
+                    connection,
+                    row["workflow_id"],
+                    plan,
+                    self._now(),
+                    row["organization_id"],
+                )
             repaired += 1
         return repaired
 
@@ -62,9 +68,9 @@ class WorkflowService:
                 """
                 INSERT INTO agent_workflows (
                     workflow_id, prompt, requested_by, status, plan_json,
-                    current_action_index, created_at, updated_at
+                    current_action_index, created_at, updated_at, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workflow_id,
@@ -75,20 +81,27 @@ class WorkflowService:
                     0,
                     now,
                     now,
+                    user.organization_id,
                 ),
             )
-            self._insert_actions(connection, workflow_id, plan, now)
+            self._insert_actions(
+                connection, workflow_id, plan, now, user.organization_id
+            )
 
         audit_service.record(
             actor_id=user.user_id,
             event_type="agent.workflow_materialized",
             detail={"workflow_id": workflow_id, "actions": len(plan.actions)},
+            organization_id=user.organization_id,
         )
         return self.run_workflow(workflow_id, user)
 
     def list_workflows(self, user: UserContext) -> list[AgentWorkflowRecord]:
-        where_clause = "" if user.role in {"admin", "manager"} else "WHERE requested_by = ?"
-        params = () if not where_clause else (user.user_id,)
+        where_clause = "WHERE organization_id = ?"
+        params: tuple[object, ...] = (user.organization_id,)
+        if user.role not in {"admin", "manager"}:
+            where_clause += " AND requested_by = ?"
+            params += (user.user_id,)
         with get_connection() as connection:
             rows = connection.execute(
                 f"""
@@ -103,12 +116,21 @@ class WorkflowService:
         return [self._row_to_workflow(row) for row in rows]
 
     def get_workflow(
-        self, workflow_id: str, user: UserContext | None = None
+        self,
+        workflow_id: str,
+        user: UserContext | None = None,
+        organization_id: str | None = None,
     ) -> AgentWorkflowRecord | None:
+        tenant_id = user.organization_id if user is not None else organization_id
+        where = "workflow_id = ?"
+        params: tuple[object, ...] = (workflow_id,)
+        if tenant_id is not None:
+            where += " AND organization_id = ?"
+            params += (tenant_id,)
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM agent_workflows WHERE workflow_id = ?",
-                (workflow_id,),
+                f"SELECT * FROM agent_workflows WHERE {where}",
+                params,
             ).fetchone()
         if row is None:
             return None
@@ -119,7 +141,9 @@ class WorkflowService:
 
     @staticmethod
     def can_access(workflow: AgentWorkflowRecord, user: UserContext) -> bool:
-        return user.role in {"admin", "manager"} or workflow.requested_by == user.user_id
+        return workflow.organization_id == user.organization_id and (
+            user.role in {"admin", "manager"} or workflow.requested_by == user.user_id
+        )
 
     def run_workflow(
         self, workflow_id: str, user: UserContext
@@ -132,7 +156,9 @@ class WorkflowService:
         if workflow.status in {"failed", "blocked"}:
             return workflow
 
-        requester = user_service.get_by_id(workflow.requested_by)
+        requester = user_service.get_by_id(
+            workflow.requested_by, workflow.organization_id
+        )
         if requester is None:
             self._set_workflow_status(
                 workflow_id,
@@ -243,7 +269,9 @@ class WorkflowService:
         if action.attempt_count >= action.max_attempts:
             raise ValueError("This workflow action has reached its retry limit.")
 
-        requester = user_service.get_by_id(workflow.requested_by)
+        requester = user_service.get_by_id(
+            workflow.requested_by, workflow.organization_id
+        )
         if requester is None:
             raise ValueError("The workflow requester no longer exists.")
 
@@ -290,12 +318,15 @@ class WorkflowService:
         if workflow.status == "cancelled":
             return workflow
 
-        requester = user_service.get_by_id(workflow.requested_by) or user
+        requester = user_service.get_by_id(
+            workflow.requested_by, workflow.organization_id
+        ) or user
         for action in workflow.actions:
             if action.execution_id and action.status == "waiting_for_approval":
                 approval_service.cancel_for_execution(
                     action.execution_id,
                     cancelled_by=user.user_id,
+                    organization_id=workflow.organization_id,
                 )
                 mcp_gateway_service.cancel_execution(action.execution_id, requester)
 
@@ -322,7 +353,8 @@ class WorkflowService:
         audit_service.record(
             actor_id=user.user_id,
             event_type="agent.workflow_cancelled",
-            detail={"workflow_id": workflow_id},
+        detail={"workflow_id": workflow_id},
+            organization_id=user.organization_id,
         )
         return self._require_workflow(workflow_id)
 
@@ -331,8 +363,8 @@ class WorkflowService:
     ) -> AgentWorkflowRecord | None:
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM workflow_actions WHERE execution_id = ?",
-                (execution.execution_id,),
+                "SELECT * FROM workflow_actions WHERE execution_id = ? AND organization_id = ?",
+                (execution.execution_id, execution.organization_id),
             ).fetchone()
         if row is None:
             return None
@@ -343,7 +375,9 @@ class WorkflowService:
 
         action = self._sync_action_with_execution(action, execution)
         if action.status == "completed":
-            requester = user_service.get_by_id(workflow.requested_by)
+            requester = user_service.get_by_id(
+                workflow.requested_by, workflow.organization_id
+            )
             if requester is None:
                 return workflow
             self._set_workflow_status(
@@ -457,6 +491,7 @@ class WorkflowService:
                 "execution_id": execution.execution_id,
                 "status": updated.status,
             },
+            organization_id=execution.organization_id,
         )
         return updated
 
@@ -537,7 +572,14 @@ class WorkflowService:
             }
         raise ValueError(f"Workflow action has no tool adapter: {action.action_type}")
 
-    def _insert_actions(self, connection, workflow_id: str, plan, now: str) -> None:
+    def _insert_actions(
+        self,
+        connection,
+        workflow_id: str,
+        plan,
+        now: str,
+        organization_id: str,
+    ) -> None:
         for sequence, proposal in enumerate(plan.actions):
             tool_name = TOOL_BY_ACTION.get(proposal.action_type)
             if tool_name is None:
@@ -547,9 +589,10 @@ class WorkflowService:
                 INSERT INTO workflow_actions (
                     action_instance_id, workflow_id, sequence, action_type,
                     tool_name, description, required_scope, requires_approval,
-                    status, idempotency_key, created_at, updated_at
+                    status, idempotency_key, created_at, updated_at,
+                    organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     f"wfa_{uuid4().hex}",
@@ -564,18 +607,21 @@ class WorkflowService:
                     f"workflow:{workflow_id}:action:{sequence}",
                     now,
                     now,
+                    organization_id,
                 ),
             )
 
-    def _actions_for_workflow(self, workflow_id: str) -> list[WorkflowActionRecord]:
+    def _actions_for_workflow(
+        self, workflow_id: str, organization_id: str
+    ) -> list[WorkflowActionRecord]:
         with get_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM workflow_actions
-                WHERE workflow_id = ?
+                WHERE workflow_id = ? AND organization_id = ?
                 ORDER BY sequence ASC
                 """,
-                (workflow_id,),
+                (workflow_id, organization_id),
             ).fetchall()
         return [self._row_to_action(row) for row in rows]
 
@@ -584,7 +630,9 @@ class WorkflowService:
     ) -> MCPExecutionRecord | None:
         if not action.execution_id:
             return None
-        return mcp_gateway_service.get_execution(action.execution_id)
+        return mcp_gateway_service.get_execution(
+            action.execution_id, action.organization_id
+        )
 
     def _require_workflow(self, workflow_id: str) -> AgentWorkflowRecord:
         workflow = self.get_workflow(workflow_id)
@@ -630,11 +678,14 @@ class WorkflowService:
     def _row_to_workflow(self, row) -> AgentWorkflowRecord:
         return AgentWorkflowRecord(
             workflow_id=row["workflow_id"],
+            organization_id=row["organization_id"],
             prompt=row["prompt"],
             requested_by=row["requested_by"],
             status=row["status"],
             plan=AgentPlanResponse(**decode_json(row["plan_json"], {})),
-            actions=self._actions_for_workflow(row["workflow_id"]),
+            actions=self._actions_for_workflow(
+                row["workflow_id"], row["organization_id"]
+            ),
             current_action_index=int(row["current_action_index"]),
             last_error=row["last_error"],
             created_at=self._string_or_none(row["created_at"]),
@@ -648,6 +699,7 @@ class WorkflowService:
     def _row_to_action(row) -> WorkflowActionRecord:
         return WorkflowActionRecord(
             action_instance_id=row["action_instance_id"],
+            organization_id=row["organization_id"],
             workflow_id=row["workflow_id"],
             sequence=int(row["sequence"]),
             action_type=row["action_type"],

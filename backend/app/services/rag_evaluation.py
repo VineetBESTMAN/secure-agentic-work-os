@@ -90,8 +90,13 @@ class RagEvaluationService:
         payload: RagEvaluationDatasetCreate,
         created_by: str,
         role: str,
+        organization_id: str = "org_default",
     ) -> RagEvaluationDatasetRecord:
-        corpus = self._load_corpus(document_ids=payload.document_ids, role=role)
+        corpus = self._load_corpus(
+            document_ids=payload.document_ids,
+            role=role,
+            organization_id=organization_id,
+        )
         corpus_document_ids = {row["document_id"] for row in corpus}
         corpus_chunk_ids = {row["chunk_id"] for row in corpus}
         if not corpus:
@@ -117,9 +122,9 @@ class RagEvaluationService:
                 """
                 INSERT INTO rag_evaluation_datasets (
                     dataset_id, name, description, document_ids_json, top_k,
-                    minimum_score, created_by
+                    minimum_score, created_by, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     dataset_id,
@@ -129,6 +134,7 @@ class RagEvaluationService:
                     payload.top_k,
                     payload.minimum_score,
                     created_by,
+                    organization_id,
                 ),
             )
             connection.executemany(
@@ -136,9 +142,10 @@ class RagEvaluationService:
                 INSERT INTO rag_evaluation_cases (
                     case_id, dataset_id, position, question,
                     expected_document_ids_json, expected_chunk_ids_json,
-                    expected_facts_json, reference_answer, unanswerable
+                    expected_facts_json, reference_answer, unanswerable,
+                    organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -151,14 +158,18 @@ class RagEvaluationService:
                         encode_json([fact.strip() for fact in case.expected_facts]),
                         case.reference_answer.strip(),
                         case.unanswerable,
+                        organization_id,
                     )
                     for position, case in enumerate(payload.cases)
                 ],
             )
-        return self.get_dataset(dataset_id)
+        return self.get_dataset(dataset_id, organization_id=organization_id)
 
     def list_datasets(
-        self, role: str, actor_id: str
+        self,
+        role: str,
+        actor_id: str,
+        organization_id: str = "org_default",
     ) -> list[RagEvaluationDatasetRecord]:
         with get_connection() as connection:
             rows = connection.execute(
@@ -166,15 +177,22 @@ class RagEvaluationService:
                 SELECT d.*, COUNT(c.case_id) AS case_count
                 FROM rag_evaluation_datasets d
                 LEFT JOIN rag_evaluation_cases c ON c.dataset_id = d.dataset_id
+                WHERE d.organization_id = ?
                 GROUP BY d.dataset_id
                 ORDER BY d.created_at DESC
-                """
+                """,
+                (organization_id,),
             ).fetchall()
         datasets = [self._row_to_dataset(row, cases=[]) for row in rows]
         return [
             dataset
             for dataset in datasets
-            if self._dataset_accessible(dataset, role=role, actor_id=actor_id)
+            if self._dataset_accessible(
+                dataset,
+                role=role,
+                actor_id=actor_id,
+                organization_id=organization_id,
+            )
         ]
 
     def get_dataset(
@@ -182,6 +200,7 @@ class RagEvaluationService:
         dataset_id: str,
         role: str | None = None,
         actor_id: str | None = None,
+        organization_id: str = "org_default",
     ) -> RagEvaluationDatasetRecord:
         with get_connection() as connection:
             row = connection.execute(
@@ -189,25 +208,28 @@ class RagEvaluationService:
                 SELECT d.*, COUNT(c.case_id) AS case_count
                 FROM rag_evaluation_datasets d
                 LEFT JOIN rag_evaluation_cases c ON c.dataset_id = d.dataset_id
-                WHERE d.dataset_id = ?
+                WHERE d.dataset_id = ? AND d.organization_id = ?
                 GROUP BY d.dataset_id
                 """,
-                (dataset_id,),
+                (dataset_id, organization_id),
             ).fetchone()
             case_rows = connection.execute(
                 """
                 SELECT * FROM rag_evaluation_cases
-                WHERE dataset_id = ?
+                WHERE dataset_id = ? AND organization_id = ?
                 ORDER BY position ASC
                 """,
-                (dataset_id,),
+                (dataset_id, organization_id),
             ).fetchall()
         if row is None:
             raise ValueError("RAG evaluation dataset not found.")
         cases = [self._row_to_case(case_row) for case_row in case_rows]
         dataset = self._row_to_dataset(row, cases=cases)
         if role is not None and not self._dataset_accessible(
-            dataset, role=role, actor_id=actor_id
+            dataset,
+            role=role,
+            actor_id=actor_id,
+            organization_id=organization_id,
         ):
             raise ValueError("RAG evaluation dataset not found.")
         return dataset
@@ -218,9 +240,19 @@ class RagEvaluationService:
         providers: list[str],
         created_by: str,
         role: str,
+        organization_id: str = "org_default",
     ) -> RagEvaluationComparison:
-        dataset = self.get_dataset(dataset_id, role=role, actor_id=created_by)
-        corpus = self._load_corpus(document_ids=dataset.document_ids, role=role)
+        dataset = self.get_dataset(
+            dataset_id,
+            role=role,
+            actor_id=created_by,
+            organization_id=organization_id,
+        )
+        corpus = self._load_corpus(
+            document_ids=dataset.document_ids,
+            role=role,
+            organization_id=organization_id,
+        )
         if not corpus:
             raise ValueError("The evaluation corpus has no accessible, safe document chunks.")
         max_chunks = get_settings().rag_evaluation_max_chunks
@@ -238,6 +270,7 @@ class RagEvaluationService:
                 dataset=dataset,
                 provider=provider,
                 created_by=created_by,
+                organization_id=organization_id,
             )
             unavailable_reason = embedding_service.provider_unavailable_reason(provider)
             if unavailable_reason:
@@ -248,12 +281,15 @@ class RagEvaluationService:
                 )
             else:
                 try:
-                    with observability_service.context(created_by):
+                    with observability_service.context(
+                        created_by, organization_id=organization_id
+                    ):
                         self._execute_run(
                             run_id=run_id,
                             dataset=dataset,
                             corpus=corpus,
                             provider=provider,
+                            organization_id=organization_id,
                         )
                 except Exception as exc:
                     self._finish_without_results(
@@ -261,7 +297,14 @@ class RagEvaluationService:
                         status="failed",
                         error=str(exc),
                     )
-            runs.append(self.get_run(run_id, role=role, actor_id=created_by))
+            runs.append(
+                self.get_run(
+                    run_id,
+                    role=role,
+                    actor_id=created_by,
+                    organization_id=organization_id,
+                )
+            )
         return RagEvaluationComparison(
             comparison_id=comparison_id,
             dataset_id=dataset_id,
@@ -269,7 +312,11 @@ class RagEvaluationService:
         )
 
     def list_runs(
-        self, role: str, actor_id: str, limit: int = 50
+        self,
+        role: str,
+        actor_id: str,
+        limit: int = 50,
+        organization_id: str = "org_default",
     ) -> list[RagEvaluationRunRecord]:
         with get_connection() as connection:
             rows = connection.execute(
@@ -277,15 +324,20 @@ class RagEvaluationService:
                 SELECT r.*, d.name AS dataset_name
                 FROM rag_evaluation_runs r
                 JOIN rag_evaluation_datasets d ON d.dataset_id = r.dataset_id
+                WHERE r.organization_id = ?
                 ORDER BY r.created_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (organization_id, limit),
             ).fetchall()
         runs = [self._row_to_run(row, results=[]) for row in rows]
         accessible_dataset_ids = {
             dataset.dataset_id
-            for dataset in self.list_datasets(role=role, actor_id=actor_id)
+            for dataset in self.list_datasets(
+                role=role,
+                actor_id=actor_id,
+                organization_id=organization_id,
+            )
         }
         return [
             run
@@ -299,6 +351,7 @@ class RagEvaluationService:
         run_id: str,
         role: str | None = None,
         actor_id: str | None = None,
+        organization_id: str = "org_default",
     ) -> RagEvaluationRunRecord:
         with get_connection() as connection:
             row = connection.execute(
@@ -306,17 +359,17 @@ class RagEvaluationService:
                 SELECT r.*, d.name AS dataset_name
                 FROM rag_evaluation_runs r
                 JOIN rag_evaluation_datasets d ON d.dataset_id = r.dataset_id
-                WHERE r.run_id = ?
+                WHERE r.run_id = ? AND r.organization_id = ?
                 """,
-                (run_id,),
+                (run_id, organization_id),
             ).fetchone()
             result_rows = connection.execute(
                 """
                 SELECT * FROM rag_evaluation_results
-                WHERE run_id = ?
+                WHERE run_id = ? AND organization_id = ?
                 ORDER BY created_at ASC
                 """,
-                (run_id,),
+                (run_id, organization_id),
             ).fetchall()
         if row is None:
             raise ValueError("RAG evaluation run not found.")
@@ -325,7 +378,12 @@ class RagEvaluationService:
             results=[self._row_to_result(result_row) for result_row in result_rows],
         )
         if role is not None:
-            self.get_dataset(run.dataset_id, role=role, actor_id=actor_id)
+            self.get_dataset(
+                run.dataset_id,
+                role=role,
+                actor_id=actor_id,
+                organization_id=organization_id,
+            )
             if role != "admin" and run.created_by != actor_id:
                 raise ValueError("RAG evaluation run not found.")
         return run
@@ -336,6 +394,7 @@ class RagEvaluationService:
         dataset: RagEvaluationDatasetRecord,
         corpus: list,
         provider: str,
+        organization_id: str = "org_default",
     ) -> None:
         index_started = time.perf_counter()
         corpus_embeddings = embedding_service.embed_many(
@@ -369,9 +428,9 @@ class RagEvaluationService:
                 INSERT INTO rag_evaluation_results (
                     result_id, run_id, case_id, question, citations_json,
                     retrieval_accuracy, citation_correctness, groundedness,
-                    hallucination_detected, latency_ms, error
+                    hallucination_detected, latency_ms, error, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -386,6 +445,7 @@ class RagEvaluationService:
                         result["hallucination_detected"],
                         result["latency_ms"],
                         None,
+                        organization_id,
                     )
                     for result in results
                 ],
@@ -496,6 +556,7 @@ class RagEvaluationService:
         dataset: RagEvaluationDatasetRecord,
         provider: str,
         created_by: str,
+        organization_id: str = "org_default",
     ) -> str:
         run_id = f"evalrun_{uuid4().hex}"
         with get_connection() as connection:
@@ -503,9 +564,9 @@ class RagEvaluationService:
                 """
                 INSERT INTO rag_evaluation_runs (
                     run_id, comparison_id, dataset_id, provider, model,
-                    status, case_count, created_by
+                    status, case_count, created_by, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -516,6 +577,7 @@ class RagEvaluationService:
                     "running",
                     dataset.case_count,
                     created_by,
+                    organization_id,
                 ),
             )
         return run_id
@@ -531,9 +593,14 @@ class RagEvaluationService:
                 (status, error[:2_000], datetime.now(timezone.utc).isoformat(), run_id),
             )
 
-    def _load_corpus(self, document_ids: list[str], role: str) -> list:
-        where = ["d.unsafe = ?"]
-        params: list[object] = [False]
+    def _load_corpus(
+        self,
+        document_ids: list[str],
+        role: str,
+        organization_id: str = "org_default",
+    ) -> list:
+        where = ["d.unsafe = ?", "d.organization_id = ?"]
+        params: list[object] = [False, organization_id]
         if role != "admin":
             where.append("d.classification != ?")
             params.append("restricted")
@@ -560,6 +627,7 @@ class RagEvaluationService:
         dataset: RagEvaluationDatasetRecord,
         role: str,
         actor_id: str | None,
+        organization_id: str = "org_default",
     ) -> bool:
         if role == "admin":
             return True
@@ -569,7 +637,11 @@ class RagEvaluationService:
             return True
         accessible_document_ids = {
             row["document_id"]
-            for row in self._load_corpus(dataset.document_ids, role=role)
+            for row in self._load_corpus(
+                dataset.document_ids,
+                role=role,
+                organization_id=organization_id,
+            )
         }
         return set(dataset.document_ids) <= accessible_document_ids
 
@@ -577,6 +649,7 @@ class RagEvaluationService:
         return RagEvaluationCaseRecord(
             case_id=row["case_id"],
             dataset_id=row["dataset_id"],
+            organization_id=row["organization_id"],
             position=row["position"],
             question=row["question"],
             expected_document_ids=decode_json(row["expected_document_ids_json"], []),
@@ -591,6 +664,7 @@ class RagEvaluationService:
     ) -> RagEvaluationDatasetRecord:
         return RagEvaluationDatasetRecord(
             dataset_id=row["dataset_id"],
+            organization_id=row["organization_id"],
             name=row["name"],
             description=row["description"],
             document_ids=decode_json(row["document_ids_json"], []),
@@ -607,6 +681,7 @@ class RagEvaluationService:
         return RagEvaluationResultRecord(
             result_id=row["result_id"],
             run_id=row["run_id"],
+            organization_id=row["organization_id"],
             case_id=row["case_id"],
             question=row["question"],
             citations=[
@@ -627,6 +702,7 @@ class RagEvaluationService:
     ) -> RagEvaluationRunRecord:
         return RagEvaluationRunRecord(
             run_id=row["run_id"],
+            organization_id=row["organization_id"],
             comparison_id=row["comparison_id"],
             dataset_id=row["dataset_id"],
             dataset_name=row["dataset_name"],

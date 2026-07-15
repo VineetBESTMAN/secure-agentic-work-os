@@ -14,6 +14,7 @@ from app.api.routes import (
     jobs,
     mcp,
     observability,
+    organizations,
     policies,
     rag_evaluations,
 )
@@ -69,4 +70,5 @@ app.include_router(policies.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(observability.router, prefix="/api")
 app.include_router(rag_evaluations.router, prefix="/api")
+app.include_router(organizations.router, prefix="/api")
 app.mount("/protocol", security_mcp_http_app)

@@ -6,7 +6,13 @@ from app.models.schemas import JobRecord
 
 
 class JobService:
-    def create(self, job_type: str, detail: dict[str, object], created_by: str) -> JobRecord:
+    def create(
+        self,
+        job_type: str,
+        detail: dict[str, object],
+        created_by: str,
+        organization_id: str = "org_default",
+    ) -> JobRecord:
         now = datetime.now(timezone.utc).isoformat()
         job = JobRecord(
             job_id=f"job_{uuid4().hex}",
@@ -23,9 +29,9 @@ class JobService:
                 """
                 INSERT INTO background_jobs (
                     job_id, job_type, status, detail_json, result_json,
-                    created_by, created_at, updated_at
+                    created_by, created_at, updated_at, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -36,6 +42,7 @@ class JobService:
                     job.created_by,
                     job.created_at,
                     job.updated_at,
+                    organization_id,
                 ),
             )
         return job
@@ -60,25 +67,32 @@ class JobService:
             result={"progress": 100, "error": str(error)},
         )
 
-    def get(self, job_id: str) -> JobRecord:
+    def get(self, job_id: str, organization_id: str | None = None) -> JobRecord:
+        where = "job_id = ?"
+        params: tuple[object, ...] = (job_id,)
+        if organization_id is not None:
+            where += " AND organization_id = ?"
+            params += (organization_id,)
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM background_jobs WHERE job_id = ?",
-                (job_id,),
+                f"SELECT * FROM background_jobs WHERE {where}",
+                params,
             ).fetchone()
         if row is None:
             raise ValueError("Job not found.")
         return self._row_to_job(row)
 
-    def list_jobs(self) -> list[JobRecord]:
+    def list_jobs(self, organization_id: str = "org_default") -> list[JobRecord]:
         with get_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT *
                 FROM background_jobs
+                WHERE organization_id = ?
                 ORDER BY created_at DESC
                 LIMIT 100
-                """
+                """,
+                (organization_id,),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 

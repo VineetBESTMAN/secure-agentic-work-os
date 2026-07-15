@@ -17,9 +17,12 @@ def list_pending_approvals(user=Depends(get_current_user)) -> list[ApprovalRecor
         actor_id=user.user_id,
         event_type="approvals.list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
     requested_by = None if user.role in {"admin", "manager"} else user.user_id
-    return approval_service.list_requests(requested_by=requested_by)
+    return approval_service.list_requests(
+        organization_id=user.organization_id, requested_by=requested_by
+    )
 
 
 @router.post("/{approval_id}/decision", response_model=ApprovalRecord)
@@ -34,6 +37,7 @@ def decide_approval(
             approval_id=approval_id,
             approved=payload.approved,
             reviewer_id=user.user_id,
+            organization_id=user.organization_id,
         )
     except PermissionError as exc:
         raise HTTPException(
@@ -50,7 +54,7 @@ def decide_approval(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Approval request not found",
         )
-    execution = mcp_gateway_service.apply_approval(approval_id)
+    execution = mcp_gateway_service.apply_approval(approval_id, user.organization_id)
     workflow = (
         workflow_service.handle_execution_update(execution) if execution else None
     )
@@ -65,5 +69,6 @@ def decide_approval(
             "workflow_id": workflow.workflow_id if workflow else "",
             "workflow_status": workflow.status if workflow else "not_linked",
         },
+        organization_id=user.organization_id,
     )
     return decision

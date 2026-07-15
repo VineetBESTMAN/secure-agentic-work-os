@@ -18,6 +18,7 @@ def create_plan(
         actor_id=user.user_id,
         event_type="agent.plan",
         detail={"prompt": payload.prompt, "actions": len(plan.actions)},
+        organization_id=user.organization_id,
     )
     return plan
 
@@ -31,6 +32,7 @@ def create_workflow(
         actor_id=user.user_id,
         event_type="agent.workflow_create",
         detail={"workflow_id": workflow.workflow_id, "status": workflow.status},
+        organization_id=user.organization_id,
     )
     return workflow
 
@@ -41,6 +43,7 @@ def list_workflows(user=Depends(get_current_user)) -> list[AgentWorkflowRecord]:
         actor_id=user.user_id,
         event_type="agent.workflow_list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
     return workflow_service.list_workflows(user)
 
@@ -112,5 +115,6 @@ def _run_workflow_command(
         actor_id=user.user_id,
         event_type=f"agent.workflow_{command}",
         detail={"workflow_id": workflow_id, "status": workflow.status},
+        organization_id=user.organization_id,
     )
     return workflow

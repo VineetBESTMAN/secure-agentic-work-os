@@ -115,13 +115,13 @@ class MCPGatewayService:
             )
         }
 
-    def list_tools(self) -> list[MCPToolDefinition]:
+    def list_tools(self, organization_id: str = "org_default") -> list[MCPToolDefinition]:
         return [
             MCPToolDefinition(
                 name=tool.name,
                 description=tool.description,
                 required_scope=tool.required_scope,
-                approval_required=self._requires_approval(tool),
+                approval_required=self._requires_approval(tool, organization_id),
                 side_effect=tool.side_effect,
                 input_schema=tool.arguments_model.model_json_schema(),
             )
@@ -165,7 +165,9 @@ class MCPGatewayService:
         arguments = self._validate_arguments(tool, request.arguments)
         arguments_hash = self._hash_arguments(arguments)
         if request.idempotency_key:
-            existing = self.get_by_idempotency_key(request.idempotency_key)
+            existing = self.get_by_idempotency_key(
+                request.idempotency_key, user.organization_id
+            )
             if existing is not None:
                 if (
                     existing.tool_name != tool.name
@@ -179,7 +181,9 @@ class MCPGatewayService:
         execution_id = f"mcp_{uuid4().hex}"
 
         unsafe_reasons = self._unsafe_reasons(arguments)
-        if unsafe_reasons and policy_service.unsafe_content_blocks_tools(True):
+        if unsafe_reasons and policy_service.unsafe_content_blocks_tools(
+            True, user.organization_id
+        ):
             execution = self._insert_execution(
                 execution_id=execution_id,
                 tool=tool,
@@ -194,7 +198,7 @@ class MCPGatewayService:
             self._observe_execution(execution)
             return execution
 
-        if self._requires_approval(tool):
+        if self._requires_approval(tool, user.organization_id):
             execution = self._insert_execution(
                 execution_id=execution_id,
                 tool=tool,
@@ -209,6 +213,7 @@ class MCPGatewayService:
                 requested_by=user.user_id,
                 execution_id=execution_id,
                 arguments_hash=arguments_hash,
+                organization_id=user.organization_id,
             )
             execution = self._update_execution(
                 execution_id,
@@ -229,11 +234,13 @@ class MCPGatewayService:
         )
         return self._run(execution, tool, user)
 
-    def apply_approval(self, approval_id: str) -> MCPExecutionRecord | None:
-        approval = approval_service.get(approval_id)
+    def apply_approval(
+        self, approval_id: str, organization_id: str = "org_default"
+    ) -> MCPExecutionRecord | None:
+        approval = approval_service.get(approval_id, organization_id)
         if approval is None or approval.execution_id is None:
             return None
-        execution = self.get_execution(approval.execution_id)
+        execution = self.get_execution(approval.execution_id, organization_id)
         if execution is None:
             return None
         if approval.status == "rejected":
@@ -259,7 +266,9 @@ class MCPGatewayService:
             return execution
 
         tool = self._get_tool(execution.tool_name)
-        user = user_service.get_by_id(execution.requested_by)
+        user = user_service.get_by_id(
+            execution.requested_by, execution.organization_id
+        )
         if user is None:
             execution = self._update_execution(
                 execution.execution_id,
@@ -281,7 +290,9 @@ class MCPGatewayService:
             return execution
 
         unsafe_reasons = self._unsafe_reasons(execution.arguments)
-        if unsafe_reasons and policy_service.unsafe_content_blocks_tools(True):
+        if unsafe_reasons and policy_service.unsafe_content_blocks_tools(
+            True, execution.organization_id
+        ):
             execution = self._update_execution(
                 execution.execution_id,
                 status="blocked",
@@ -297,7 +308,7 @@ class MCPGatewayService:
     def retry_execution(
         self, execution_id: str, user: UserContext
     ) -> MCPExecutionRecord:
-        execution = self.get_execution(execution_id)
+        execution = self.get_execution(execution_id, user.organization_id)
         if execution is None:
             raise ValueError("MCP execution not found.")
         if execution.requested_by != user.user_id:
@@ -323,7 +334,7 @@ class MCPGatewayService:
     def cancel_execution(
         self, execution_id: str, user: UserContext
     ) -> MCPExecutionRecord:
-        execution = self.get_execution(execution_id)
+        execution = self.get_execution(execution_id, user.organization_id)
         if execution is None:
             raise ValueError("MCP execution not found.")
         if execution.requested_by != user.user_id and user.role not in {"admin", "manager"}:
@@ -340,8 +351,11 @@ class MCPGatewayService:
         return cancelled
 
     def list_executions(self, user: UserContext) -> list[MCPExecutionRecord]:
-        where_clause = "" if user.role in {"admin", "manager"} else "WHERE requested_by = ?"
-        params = () if not where_clause else (user.user_id,)
+        where_clause = "WHERE organization_id = ?"
+        params: tuple[object, ...] = (user.organization_id,)
+        if user.role not in {"admin", "manager"}:
+            where_clause += " AND requested_by = ?"
+            params += (user.user_id,)
         with get_connection() as connection:
             rows = connection.execute(
                 f"""
@@ -354,30 +368,43 @@ class MCPGatewayService:
             ).fetchall()
         return [self._row_to_execution(row) for row in rows]
 
-    def get_execution(self, execution_id: str) -> MCPExecutionRecord | None:
+    def get_execution(
+        self, execution_id: str, organization_id: str | None = None
+    ) -> MCPExecutionRecord | None:
+        where = "execution_id = ?"
+        params: tuple[object, ...] = (execution_id,)
+        if organization_id is not None:
+            where += " AND organization_id = ?"
+            params += (organization_id,)
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM mcp_tool_executions WHERE execution_id = ?",
-                (execution_id,),
+                f"SELECT * FROM mcp_tool_executions WHERE {where}",
+                params,
             ).fetchone()
         return self._row_to_execution(row) if row is not None else None
 
-    def get_by_idempotency_key(self, idempotency_key: str) -> MCPExecutionRecord | None:
+    def get_by_idempotency_key(
+        self, idempotency_key: str, organization_id: str = "org_default"
+    ) -> MCPExecutionRecord | None:
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM mcp_tool_executions WHERE idempotency_key = ?",
-                (idempotency_key,),
+                "SELECT * FROM mcp_tool_executions WHERE idempotency_key = ? AND organization_id = ?",
+                (idempotency_key, organization_id),
             ).fetchone()
         return self._row_to_execution(row) if row is not None else None
 
     def can_view_execution(self, execution: MCPExecutionRecord, user: UserContext) -> bool:
-        return user.role in {"admin", "manager"} or execution.requested_by == user.user_id
+        return execution.organization_id == user.organization_id and (
+            user.role in {"admin", "manager"} or execution.requested_by == user.user_id
+        )
 
     def _run(
         self, execution: MCPExecutionRecord, tool: SecureTool, user: UserContext
     ) -> MCPExecutionRecord:
         started = time.perf_counter()
-        with observability_service.context(user.user_id):
+        with observability_service.context(
+            user.user_id, organization_id=user.organization_id
+        ):
             try:
                 arguments = tool.arguments_model.model_validate(execution.arguments)
                 result = tool.handler(arguments, user, execution.execution_id)
@@ -424,9 +451,9 @@ class MCPGatewayService:
                 INSERT INTO mcp_tool_executions (
                     execution_id, tool_name, requested_by, required_scope,
                     arguments_json, arguments_hash, idempotency_key,
-                    status, result_json, error
+                    status, result_json, error, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     execution_id,
@@ -439,9 +466,10 @@ class MCPGatewayService:
                     execution_status,
                     encode_json({}),
                     error,
+                    user.organization_id,
                 ),
             )
-        execution = self.get_execution(execution_id)
+        execution = self.get_execution(execution_id, user.organization_id)
         if execution is None:  # pragma: no cover
             raise RuntimeError("Tool execution could not be persisted.")
         return execution
@@ -528,6 +556,7 @@ class MCPGatewayService:
     def _row_to_execution(row) -> MCPExecutionRecord:
         return MCPExecutionRecord(
             execution_id=row["execution_id"],
+            organization_id=row["organization_id"],
             tool_name=row["tool_name"],
             requested_by=row["requested_by"],
             required_scope=row["required_scope"],
@@ -554,6 +583,7 @@ class MCPGatewayService:
                 "approval_id": execution.approval_id or "",
                 "arguments_hash": execution.arguments_hash,
             },
+            organization_id=execution.organization_id,
         )
 
     @staticmethod
@@ -565,6 +595,7 @@ class MCPGatewayService:
             question=payload.question,
             role=user.role,
             actor_id=user.user_id,
+            organization_id=user.organization_id,
         )
         return answer.model_dump(mode="json")
 
@@ -593,6 +624,7 @@ class MCPGatewayService:
                 "required_scope": execution.required_scope,
                 "error": execution.error or "",
             },
+            organization_id=execution.organization_id,
         )
 
     @staticmethod
@@ -603,17 +635,17 @@ class MCPGatewayService:
         task_id = f"task_{uuid4().hex}"
         with get_connection() as connection:
             existing = connection.execute(
-                "SELECT * FROM workspace_tasks WHERE source_execution_id = ?",
-                (execution_id,),
+                "SELECT * FROM workspace_tasks WHERE source_execution_id = ? AND organization_id = ?",
+                (execution_id, user.organization_id),
             ).fetchone()
             if existing is None:
                 connection.execute(
                     """
                     INSERT INTO workspace_tasks (
                         task_id, title, description, due_date, status,
-                        created_by, source_execution_id
+                        created_by, source_execution_id, organization_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -623,6 +655,7 @@ class MCPGatewayService:
                         "open",
                         user.user_id,
                         execution_id,
+                        user.organization_id,
                     ),
                 )
             else:
@@ -652,7 +685,9 @@ class MCPGatewayService:
         arguments: BaseModel, user: UserContext, execution_id: str
     ) -> dict[str, object]:
         payload = ExportDataArguments.model_validate(arguments)
-        documents = rag_service.list_documents(role=user.role)
+        documents = rag_service.list_documents(
+            role=user.role, organization_id=user.organization_id
+        )
         if payload.classification != "all":
             documents = [
                 document
@@ -675,13 +710,15 @@ class MCPGatewayService:
         }
 
     @staticmethod
-    def _requires_approval(tool: SecureTool) -> bool:
+    def _requires_approval(
+        tool: SecureTool, organization_id: str = "org_default"
+    ) -> bool:
         settings = get_settings()
         configured = (
             tool.name == "send_email" and settings.require_approval_for_send_email
         ) or (tool.name == "export_data" and settings.require_approval_for_export)
         return tool.approval_required or configured or policy_service.tool_requires_approval(
-            tool.name
+            tool.name, organization_id
         )
 
 

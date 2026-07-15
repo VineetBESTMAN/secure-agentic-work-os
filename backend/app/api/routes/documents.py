@@ -44,6 +44,7 @@ async def upload_document(
             classification=classification,
             owner_team=owner_team,
             uploaded_by=user.user_id,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -60,6 +61,7 @@ async def upload_document(
             "classification": document.classification,
             "unsafe": document.unsafe,
         },
+        organization_id=user.organization_id,
     )
     return document
 
@@ -84,6 +86,7 @@ async def queue_document_upload(
             classification=classification,
             owner_team=owner_team,
             uploaded_by=user.user_id,
+            organization_id=user.organization_id,
         )
     except BackgroundQueueError as exc:
         raise HTTPException(
@@ -100,6 +103,7 @@ async def queue_document_upload(
         actor_id=user.user_id,
         event_type="documents.upload_queued",
         detail={"job_id": job.job_id, "filename": file.filename or "uploaded-document.txt"},
+        organization_id=user.organization_id,
     )
     return AsyncJobResponse(job=job, message="Document ingestion was queued.")
 
@@ -114,6 +118,7 @@ def query_documents(
             question=payload.question,
             role=user.role,
             actor_id=user.user_id,
+            organization_id=user.organization_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -128,6 +133,7 @@ def query_documents(
             "role": user.role,
             "flagged": scan.flagged,
         },
+        organization_id=user.organization_id,
     )
     return answer
 
@@ -138,8 +144,9 @@ def list_documents(user=Depends(get_current_user)) -> list[DocumentRecord]:
         actor_id=user.user_id,
         event_type="documents.list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
-    return rag_service.list_documents(role=user.role)
+    return rag_service.list_documents(role=user.role, organization_id=user.organization_id)
 
 
 @router.get("/unsafe", response_model=list[DocumentRecord])
@@ -149,8 +156,9 @@ def list_unsafe_documents(user=Depends(get_current_user)) -> list[DocumentRecord
         actor_id=user.user_id,
         event_type="documents.unsafe_list",
         detail={"role": user.role},
+        organization_id=user.organization_id,
     )
-    return rag_service.list_unsafe_documents()
+    return rag_service.list_unsafe_documents(user.organization_id)
 
 
 @router.get("/{document_id}", response_model=DocumentDetail)
@@ -158,7 +166,9 @@ def get_document_detail(
     document_id: str, user=Depends(get_current_user)
 ) -> DocumentDetail:
     try:
-        document = rag_service.get_document_detail(document_id=document_id, role=user.role)
+        document = rag_service.get_document_detail(
+            document_id=document_id, role=user.role, organization_id=user.organization_id
+        )
     except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -174,6 +184,7 @@ def get_document_detail(
         actor_id=user.user_id,
         event_type="documents.detail",
         detail={"document_id": document_id, "chunks": len(document.chunks)},
+        organization_id=user.organization_id,
     )
     return document
 
@@ -190,6 +201,7 @@ def update_document(
             document_id=document_id,
             payload=payload,
             role=user.role,
+            organization_id=user.organization_id,
         )
     except PermissionError as exc:
         raise HTTPException(
@@ -206,6 +218,7 @@ def update_document(
         actor_id=user.user_id,
         event_type="documents.update",
         detail={"document_id": document_id, "classification": document.classification},
+        organization_id=user.organization_id,
     )
     return document
 
@@ -216,7 +229,9 @@ def reindex_document(
 ) -> ReindexResponse:
     require_scope(user.scopes, "documents:write")
     try:
-        document = rag_service.reindex_document(document_id=document_id, role=user.role)
+        document = rag_service.reindex_document(
+            document_id=document_id, role=user.role, organization_id=user.organization_id
+        )
     except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -232,6 +247,7 @@ def reindex_document(
         actor_id=user.user_id,
         event_type="documents.reindex",
         detail={"document_id": document_id, "chunks": document.chunk_count},
+        organization_id=user.organization_id,
     )
     return ReindexResponse(document=document, message="Document reindexed successfully.")
 
@@ -246,13 +262,18 @@ def queue_document_reindex(
 ) -> AsyncJobResponse:
     require_scope(user.scopes, "documents:write")
     try:
-        document = rag_service.get_document(document_id=document_id)
-        if not rag_service.can_access_document(document=document, role=user.role):
+        document = rag_service.get_document(
+            document_id=document_id, organization_id=user.organization_id
+        )
+        if not rag_service.can_access_document(
+            document=document, role=user.role, organization_id=user.organization_id
+        ):
             raise PermissionError("You do not have access to this document.")
         job = background_task_service.enqueue_reindex(
             document_id=document_id,
             role=user.role,
             requested_by=user.user_id,
+            organization_id=user.organization_id,
         )
     except PermissionError as exc:
         raise HTTPException(
@@ -269,6 +290,7 @@ def queue_document_reindex(
         actor_id=user.user_id,
         event_type="documents.reindex_queued",
         detail={"document_id": document_id, "job_id": job.job_id},
+        organization_id=user.organization_id,
     )
     return AsyncJobResponse(job=job, message="Document reindex was queued.")
 
@@ -277,7 +299,9 @@ def queue_document_reindex(
 def delete_document(document_id: str, user=Depends(get_current_user)) -> None:
     require_scope(user.scopes, "documents:write")
     try:
-        rag_service.delete_document(document_id=document_id, role=user.role)
+        rag_service.delete_document(
+            document_id=document_id, role=user.role, organization_id=user.organization_id
+        )
     except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -293,4 +317,5 @@ def delete_document(document_id: str, user=Depends(get_current_user)) -> None:
         actor_id=user.user_id,
         event_type="documents.delete",
         detail={"document_id": document_id},
+        organization_id=user.organization_id,
     )

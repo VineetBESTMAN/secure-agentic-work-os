@@ -157,10 +157,13 @@ class RagService:
         owner_team: str,
         uploaded_by: str,
         document_id: str | None = None,
+        organization_id: str = "org_default",
     ) -> DocumentRecord:
         if document_id:
             try:
-                return self.get_document(document_id=document_id)
+                return self.get_document(
+                    document_id=document_id, organization_id=organization_id
+                )
             except ValueError:
                 pass
 
@@ -189,9 +192,9 @@ class RagService:
                 """
                 INSERT INTO documents (
                     document_id, title, filename, classification, owner_team, summary,
-                    uploaded_by, unsafe, unsafe_reasons_json
+                    uploaded_by, unsafe, unsafe_reasons_json, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document_id,
@@ -203,18 +206,29 @@ class RagService:
                     uploaded_by,
                     scan.flagged,
                     encode_json(scan.reasons),
+                    organization_id,
                 ),
             )
-            self._insert_chunks(connection, document_id=document_id, chunks=chunks)
+            with observability_service.context(
+                uploaded_by, organization_id=organization_id
+            ):
+                self._insert_chunks(
+                    connection,
+                    document_id=document_id,
+                    chunks=chunks,
+                    organization_id=organization_id,
+                )
 
-        return self.get_document(document_id=document_id)
+        return self.get_document(document_id=document_id, organization_id=organization_id)
 
-    def list_documents(self, role: str) -> list[DocumentRecord]:
-        where_clause = ""
-        params: tuple[str, ...] = ()
+    def list_documents(
+        self, role: str, organization_id: str = "org_default"
+    ) -> list[DocumentRecord]:
+        where_clause = "WHERE d.organization_id = ?"
+        params: tuple[str, ...] = (organization_id,)
         if role != "admin":
-            where_clause = "WHERE d.classification != ?"
-            params = ("restricted",)
+            where_clause += " AND d.classification != ?"
+            params += ("restricted",)
 
         with get_connection() as connection:
             rows = connection.execute(
@@ -230,25 +244,33 @@ class RagService:
             ).fetchall()
         return [_row_to_document(row) for row in rows]
 
-    def get_document(self, document_id: str) -> DocumentRecord:
+    def get_document(
+        self, document_id: str, organization_id: str = "org_default"
+    ) -> DocumentRecord:
         with get_connection() as connection:
             row = connection.execute(
                 """
                 SELECT d.*, COUNT(c.chunk_id) AS chunk_count
                 FROM documents d
                 LEFT JOIN document_chunks c ON c.document_id = d.document_id
-                WHERE d.document_id = ?
+                WHERE d.document_id = ? AND d.organization_id = ?
                 GROUP BY d.document_id
                 """,
-                (document_id,),
+                (document_id, organization_id),
             ).fetchone()
         if row is None:
             raise ValueError("Document was not found after ingestion.")
         return _row_to_document(row)
 
-    def get_document_detail(self, document_id: str, role: str) -> DocumentDetail:
-        document = self.get_document(document_id=document_id)
-        if not self.can_access_document(document=document, role=role):
+    def get_document_detail(
+        self, document_id: str, role: str, organization_id: str = "org_default"
+    ) -> DocumentDetail:
+        document = self.get_document(
+            document_id=document_id, organization_id=organization_id
+        )
+        if not self.can_access_document(
+            document=document, role=role, organization_id=organization_id
+        ):
             raise PermissionError("You do not have access to this document.")
 
         with get_connection() as connection:
@@ -256,10 +278,10 @@ class RagService:
                 """
                 SELECT chunk_id, chunk_index, text
                 FROM document_chunks
-                WHERE document_id = ?
+                WHERE document_id = ? AND organization_id = ?
                 ORDER BY chunk_index ASC
                 """,
-                (document_id,),
+                (document_id, organization_id),
             ).fetchall()
 
         return DocumentDetail(
@@ -274,18 +296,20 @@ class RagService:
             ],
         )
 
-    def list_unsafe_documents(self) -> list[DocumentRecord]:
+    def list_unsafe_documents(
+        self, organization_id: str = "org_default"
+    ) -> list[DocumentRecord]:
         with get_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT d.*, COUNT(c.chunk_id) AS chunk_count
                 FROM documents d
                 LEFT JOIN document_chunks c ON c.document_id = d.document_id
-                WHERE d.unsafe = ?
+                WHERE d.unsafe = ? AND d.organization_id = ?
                 GROUP BY d.document_id
                 ORDER BY d.created_at DESC
                 """,
-                (True,),
+                (True, organization_id),
             ).fetchall()
         return [_row_to_document(row) for row in rows]
 
@@ -294,9 +318,10 @@ class RagService:
         document_id: str,
         payload: DocumentUpdateRequest,
         role: str,
+        organization_id: str = "org_default",
     ) -> DocumentRecord:
-        document = self.get_document(document_id=document_id)
-        if not self.can_access_document(document=document, role=role):
+        document = self.get_document(document_id=document_id, organization_id=organization_id)
+        if not self.can_access_document(document=document, role=role, organization_id=organization_id):
             raise PermissionError("You do not have access to this document.")
 
         updates: list[str] = []
@@ -312,29 +337,36 @@ class RagService:
             params.append(payload.owner_team.strip() or document.owner_team)
 
         if updates:
-            params.append(document_id)
+            params.extend((document_id, organization_id))
             with get_connection() as connection:
                 connection.execute(
-                    f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ?",
+                    f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ? AND organization_id = ?",
                     tuple(params),
                 )
-        return self.get_document(document_id=document_id)
+        return self.get_document(document_id=document_id, organization_id=organization_id)
 
-    def delete_document(self, document_id: str, role: str) -> None:
-        document = self.get_document(document_id=document_id)
-        if not self.can_access_document(document=document, role=role):
+    def delete_document(
+        self, document_id: str, role: str, organization_id: str = "org_default"
+    ) -> None:
+        document = self.get_document(document_id=document_id, organization_id=organization_id)
+        if not self.can_access_document(document=document, role=role, organization_id=organization_id):
             raise PermissionError("You do not have access to this document.")
 
         with get_connection() as connection:
-            connection.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
+            connection.execute(
+                "DELETE FROM documents WHERE document_id = ? AND organization_id = ?",
+                (document_id, organization_id),
+            )
 
         file_path = self._stored_file_path(document_id=document_id, filename=document.filename)
         if file_path.exists():
             file_path.unlink()
 
-    def reindex_document(self, document_id: str, role: str) -> DocumentRecord:
-        document = self.get_document(document_id=document_id)
-        if not self.can_access_document(document=document, role=role):
+    def reindex_document(
+        self, document_id: str, role: str, organization_id: str = "org_default"
+    ) -> DocumentRecord:
+        document = self.get_document(document_id=document_id, organization_id=organization_id)
+        if not self.can_access_document(document=document, role=role, organization_id=organization_id):
             raise PermissionError("You do not have access to this document.")
 
         file_path = self._stored_file_path(document_id=document_id, filename=document.filename)
@@ -351,34 +383,60 @@ class RagService:
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
         with get_connection() as connection:
-            connection.execute("DELETE FROM document_chunks WHERE document_id = ?", (document_id,))
+            connection.execute(
+                "DELETE FROM document_chunks WHERE document_id = ? AND organization_id = ?",
+                (document_id, organization_id),
+            )
             connection.execute(
                 """
                 UPDATE documents
                 SET summary = ?, unsafe = ?, unsafe_reasons_json = ?
-                WHERE document_id = ?
+                WHERE document_id = ? AND organization_id = ?
                 """,
                 (
                     _summary(cleaned),
                     scan.flagged,
                     encode_json(scan.reasons),
                     document_id,
+                    organization_id,
                 ),
             )
-            self._insert_chunks(connection, document_id=document_id, chunks=chunks)
-        return self.get_document(document_id=document_id)
+            with observability_service.context(
+                document.document_id, organization_id=organization_id
+            ):
+                self._insert_chunks(
+                    connection,
+                    document_id=document_id,
+                    chunks=chunks,
+                    organization_id=organization_id,
+                )
+        return self.get_document(document_id=document_id, organization_id=organization_id)
 
-    def can_access_document(self, document: DocumentRecord, role: str) -> bool:
+    def can_access_document(
+        self,
+        document: DocumentRecord,
+        role: str,
+        organization_id: str = "org_default",
+    ) -> bool:
         return policy_service.document_access_allowed(
             user=None,
             role=role,
             classification=document.classification,
+            organization_id=organization_id,
         )
 
-    def answer(self, question: str, role: str, actor_id: str = "system") -> RagAnswer:
+    def answer(
+        self,
+        question: str,
+        role: str,
+        actor_id: str = "system",
+        organization_id: str = "org_default",
+    ) -> RagAnswer:
         started = time.perf_counter()
         with observability_service.context(
-            actor_id, trace_id=observability_service.current_trace_id
+            actor_id,
+            trace_id=observability_service.current_trace_id,
+            organization_id=organization_id,
         ) as trace_id:
             try:
                 query_embedding = embedding_service.embed(question)
@@ -386,7 +444,9 @@ class RagService:
                     answer = RagAnswer(answer="Ask a more specific question.", citations=[])
                 else:
                     top_matches = self._vector_matches(
-                        query_embedding=query_embedding, role=role
+                        query_embedding=query_embedding,
+                        role=role,
+                        organization_id=organization_id,
                     )
                     if not top_matches:
                         answer = RagAnswer(
@@ -437,13 +497,20 @@ class RagService:
             )
             return answer
 
-    def _insert_chunks(self, connection, document_id: str, chunks: list[str]) -> None:
+    def _insert_chunks(
+        self,
+        connection,
+        document_id: str,
+        chunks: list[str],
+        organization_id: str = "org_default",
+    ) -> None:
         embeddings = embedding_service.embed_many(chunks)
         if is_postgres_database():
             connection.executemany(
                 """
-                INSERT INTO document_chunks (chunk_id, document_id, chunk_index, text, embedding)
-                VALUES (?, ?, ?, ?, ?::vector)
+                INSERT INTO document_chunks (
+                    chunk_id, document_id, chunk_index, text, embedding, organization_id
+                ) VALUES (?, ?, ?, ?, ?::vector, ?)
                 """,
                 [
                     (
@@ -452,6 +519,7 @@ class RagService:
                         index,
                         chunk,
                         vector_literal(embeddings[index]),
+                        organization_id,
                     )
                     for index, chunk in enumerate(chunks)
                 ],
@@ -460,8 +528,9 @@ class RagService:
 
         connection.executemany(
             """
-            INSERT INTO document_chunks (chunk_id, document_id, chunk_index, text, embedding_json)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO document_chunks (
+                chunk_id, document_id, chunk_index, text, embedding_json, organization_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -470,19 +539,28 @@ class RagService:
                     index,
                     chunk,
                     encode_json(embeddings[index]),
+                    organization_id,
                 )
                 for index, chunk in enumerate(chunks)
             ],
         )
 
-    def _vector_matches(self, query_embedding: list[float], role: str):
+    def _vector_matches(
+        self, query_embedding: list[float], role: str, organization_id: str
+    ):
         if is_postgres_database():
-            return self._postgres_vector_matches(query_embedding=query_embedding, role=role)
-        return self._sqlite_vector_matches(query_embedding=query_embedding, role=role)
+            return self._postgres_vector_matches(
+                query_embedding=query_embedding, role=role, organization_id=organization_id
+            )
+        return self._sqlite_vector_matches(
+            query_embedding=query_embedding, role=role, organization_id=organization_id
+        )
 
-    def _postgres_vector_matches(self, query_embedding: list[float], role: str):
-        where = ["d.unsafe = FALSE", "c.embedding IS NOT NULL"]
-        params: list[str] = []
+    def _postgres_vector_matches(
+        self, query_embedding: list[float], role: str, organization_id: str
+    ):
+        where = ["d.unsafe = FALSE", "c.embedding IS NOT NULL", "d.organization_id = ?"]
+        params: list[str] = [organization_id]
         if role != "admin":
             where.append("d.classification != ?")
             params.append("restricted")
@@ -507,9 +585,11 @@ class RagService:
             ).fetchall()
         return [(float(row["score"]), row) for row in rows if float(row["score"]) > 0]
 
-    def _sqlite_vector_matches(self, query_embedding: list[float], role: str):
-        where = ["d.unsafe = 0"]
-        params: list[str] = []
+    def _sqlite_vector_matches(
+        self, query_embedding: list[float], role: str, organization_id: str
+    ):
+        where = ["d.unsafe = 0", "d.organization_id = ?"]
+        params: list[str] = [organization_id]
         if role != "admin":
             where.append("d.classification != ?")
             params.append("restricted")

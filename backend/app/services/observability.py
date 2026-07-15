@@ -19,6 +19,9 @@ from app.models.schemas import (
 
 _actor_context: ContextVar[str] = ContextVar("observation_actor", default="system")
 _trace_context: ContextVar[str | None] = ContextVar("observation_trace", default=None)
+_organization_context: ContextVar[str] = ContextVar(
+    "observation_organization", default="org_default"
+)
 
 
 class BudgetExceededError(ValueError):
@@ -27,15 +30,22 @@ class BudgetExceededError(ValueError):
 
 class ObservabilityService:
     @contextmanager
-    def context(self, actor_id: str, trace_id: str | None = None) -> Iterator[str]:
+    def context(
+        self,
+        actor_id: str,
+        trace_id: str | None = None,
+        organization_id: str = "org_default",
+    ) -> Iterator[str]:
         trace = trace_id or f"trace_{uuid4().hex}"
         actor_token: Token[str] = _actor_context.set(actor_id)
         trace_token: Token[str | None] = _trace_context.set(trace)
+        organization_token: Token[str] = _organization_context.set(organization_id)
         try:
             yield trace
         finally:
             _trace_context.reset(trace_token)
             _actor_context.reset(actor_token)
+            _organization_context.reset(organization_token)
 
     @property
     def actor_id(self) -> str:
@@ -63,6 +73,7 @@ class ObservabilityService:
         metadata: dict[str, object] | None = None,
         actor_id: str | None = None,
         trace_id: str | None = None,
+        organization_id: str | None = None,
     ) -> RuntimeObservation:
         observation = RuntimeObservation(
             observation_id=f"obs_{uuid4().hex}",
@@ -84,9 +95,10 @@ class ObservabilityService:
                 INSERT INTO runtime_observations (
                     observation_id, trace_id, operation_type, actor_id,
                     provider, model, status, latency_ms, input_units,
-                    output_units, estimated_cost_usd, metadata_json, created_at
+                    output_units, estimated_cost_usd, metadata_json, created_at,
+                    organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     observation.observation_id,
@@ -102,6 +114,7 @@ class ObservabilityService:
                     observation.estimated_cost_usd,
                     encode_json(observation.metadata),
                     observation.created_at.isoformat(),
+                    organization_id or _organization_context.get(),
                 ),
             )
         return observation
@@ -113,22 +126,28 @@ class ObservabilityService:
         except Exception:
             return None
 
-    def list_observations(self, *, hours: int = 24, limit: int = 200) -> list[RuntimeObservation]:
+    def list_observations(
+        self, *, hours: int = 24, limit: int = 200, organization_id: str = "org_default"
+    ) -> list[RuntimeObservation]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         with get_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM runtime_observations
-                WHERE created_at >= ?
+                WHERE created_at >= ? AND organization_id = ?
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (self._database_timestamp(cutoff), limit),
+                (self._database_timestamp(cutoff), organization_id, limit),
             ).fetchall()
         return [self._row_to_observation(row) for row in rows]
 
-    def summary(self, *, hours: int = 24) -> RuntimeSummary:
-        observations = self.list_observations(hours=hours, limit=10_000)
+    def summary(
+        self, *, hours: int = 24, organization_id: str = "org_default"
+    ) -> RuntimeSummary:
+        observations = self.list_observations(
+            hours=hours, limit=10_000, organization_id=organization_id
+        )
         latencies = sorted(item.latency_ms for item in observations)
         completed = sum(item.status == "completed" for item in observations)
         failed = sum(item.status == "failed" for item in observations)
@@ -174,11 +193,13 @@ class ObservabilityService:
                 sum(item.estimated_cost_usd for item in observations), 8
             ),
             breakdown=breakdown,
-            budgets=self.list_budgets(),
+            budgets=self.list_budgets(organization_id),
         )
 
-    def seed_defaults(self, limit_usd: float) -> None:
-        if self.list_budgets():
+    def seed_defaults(
+        self, limit_usd: float, organization_id: str = "org_default"
+    ) -> None:
+        if self.list_budgets(organization_id):
             return
         self.create_budget(
             CostBudgetCreateRequest(
@@ -189,10 +210,15 @@ class ObservabilityService:
                 enabled=True,
             ),
             created_by="system",
+            organization_id=organization_id,
         )
 
     def create_budget(
-        self, payload: CostBudgetCreateRequest, *, created_by: str
+        self,
+        payload: CostBudgetCreateRequest,
+        *,
+        created_by: str,
+        organization_id: str = "org_default",
     ) -> CostBudgetRecord:
         budget_id = f"budget_{uuid4().hex}"
         with get_connection() as connection:
@@ -200,9 +226,9 @@ class ObservabilityService:
                 """
                 INSERT INTO cost_budgets (
                     budget_id, name, period, limit_usd, warning_percent,
-                    enabled, created_by
+                    enabled, created_by, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     budget_id,
@@ -212,17 +238,21 @@ class ObservabilityService:
                     payload.warning_percent,
                     payload.enabled,
                     created_by,
+                    organization_id,
                 ),
             )
-        budget = self.get_budget(budget_id)
+        budget = self.get_budget(budget_id, organization_id)
         if budget is None:  # pragma: no cover
             raise RuntimeError("Cost budget could not be persisted.")
         return budget
 
     def update_budget(
-        self, budget_id: str, payload: CostBudgetUpdateRequest
+        self,
+        budget_id: str,
+        payload: CostBudgetUpdateRequest,
+        organization_id: str = "org_default",
     ) -> CostBudgetRecord:
-        existing = self.get_budget(budget_id)
+        existing = self.get_budget(budget_id, organization_id)
         if existing is None:
             raise ValueError("Cost budget not found.")
         updates = payload.model_dump(exclude_none=True)
@@ -231,42 +261,53 @@ class ObservabilityService:
         fields = [f"{field} = ?" for field in updates]
         params = list(updates.values())
         fields.append("updated_at = CURRENT_TIMESTAMP")
-        params.append(budget_id)
+        params.extend((budget_id, organization_id))
         with get_connection() as connection:
             connection.execute(
-                f"UPDATE cost_budgets SET {', '.join(fields)} WHERE budget_id = ?",
+                f"UPDATE cost_budgets SET {', '.join(fields)} WHERE budget_id = ? AND organization_id = ?",
                 params,
             )
-        updated = self.get_budget(budget_id)
+        updated = self.get_budget(budget_id, organization_id)
         if updated is None:  # pragma: no cover
             raise RuntimeError("Cost budget disappeared during update.")
         return updated
 
-    def delete_budget(self, budget_id: str) -> bool:
+    def delete_budget(
+        self, budget_id: str, organization_id: str = "org_default"
+    ) -> bool:
         with get_connection() as connection:
             cursor = connection.execute(
-                "DELETE FROM cost_budgets WHERE budget_id = ?", (budget_id,)
+                "DELETE FROM cost_budgets WHERE budget_id = ? AND organization_id = ?",
+                (budget_id, organization_id),
             )
             return cursor.rowcount > 0
 
-    def get_budget(self, budget_id: str) -> CostBudgetRecord | None:
+    def get_budget(
+        self, budget_id: str, organization_id: str = "org_default"
+    ) -> CostBudgetRecord | None:
         with get_connection() as connection:
             row = connection.execute(
-                "SELECT * FROM cost_budgets WHERE budget_id = ?", (budget_id,)
+                "SELECT * FROM cost_budgets WHERE budget_id = ? AND organization_id = ?",
+                (budget_id, organization_id),
             ).fetchone()
         return self._row_to_budget(row) if row is not None else None
 
-    def list_budgets(self) -> list[CostBudgetRecord]:
+    def list_budgets(
+        self, organization_id: str = "org_default"
+    ) -> list[CostBudgetRecord]:
         with get_connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM cost_budgets ORDER BY created_at ASC"
+                "SELECT * FROM cost_budgets WHERE organization_id = ? ORDER BY created_at ASC",
+                (organization_id,),
             ).fetchall()
         return [self._row_to_budget(row) for row in rows]
 
-    def assert_budget_available(self, additional_cost_usd: float) -> None:
+    def assert_budget_available(
+        self, additional_cost_usd: float, organization_id: str | None = None
+    ) -> None:
         if additional_cost_usd <= 0:
             return
-        for budget in self.list_budgets():
+        for budget in self.list_budgets(organization_id or _organization_context.get()):
             if budget.enabled and budget.spent_usd + additional_cost_usd > budget.limit_usd:
                 raise BudgetExceededError(
                     f"{budget.name} would be exceeded by this operation "
@@ -280,11 +321,12 @@ class ObservabilityService:
                 """
                 SELECT COALESCE(SUM(estimated_cost_usd), 0) AS spent
                 FROM runtime_observations
-                WHERE created_at >= ? AND created_at < ?
+                WHERE created_at >= ? AND created_at < ? AND organization_id = ?
                 """,
                 (
                     self._database_timestamp(period_start),
                     self._database_timestamp(period_end),
+                    row["organization_id"],
                 ),
             ).fetchone()
         spent = float(spent_row["spent"] or 0.0)

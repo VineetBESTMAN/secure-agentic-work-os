@@ -30,20 +30,23 @@ DEFAULT_POLICIES = [
 
 
 class PolicyService:
-    def seed_defaults(self) -> None:
-        existing_names = {policy.name for policy in self.list_policies()}
+    def seed_defaults(self, organization_id: str = "org_default") -> None:
+        existing_names = {policy.name for policy in self.list_policies(organization_id)}
         for policy in DEFAULT_POLICIES:
             if policy.name not in existing_names:
-                self.create_policy(policy)
+                self.create_policy(policy, organization_id)
 
-    def list_policies(self) -> list[PolicyRecord]:
+    def list_policies(self, organization_id: str = "org_default") -> list[PolicyRecord]:
         with get_connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM policies ORDER BY created_at DESC"
+                "SELECT * FROM policies WHERE organization_id = ? ORDER BY created_at DESC",
+                (organization_id,),
             ).fetchall()
         return [self._row_to_policy(row) for row in rows]
 
-    def create_policy(self, payload: PolicyCreateRequest) -> PolicyRecord:
+    def create_policy(
+        self, payload: PolicyCreateRequest, organization_id: str = "org_default"
+    ) -> PolicyRecord:
         policy = PolicyRecord(
             policy_id=f"pol_{uuid4().hex}",
             name=payload.name,
@@ -57,9 +60,10 @@ class PolicyService:
             connection.execute(
                 """
                 INSERT INTO policies (
-                    policy_id, name, description, rule_type, effect, conditions_json, enabled
+                    policy_id, name, description, rule_type, effect, conditions_json,
+                    enabled, organization_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     policy.policy_id,
@@ -69,14 +73,20 @@ class PolicyService:
                     policy.effect,
                     encode_json(policy.conditions),
                     policy.enabled,
+                    organization_id,
                 ),
             )
         return policy
 
     def document_access_allowed(
-        self, user: UserContext | None, role: str, classification: str
+        self,
+        user: UserContext | None,
+        role: str,
+        classification: str,
+        organization_id: str = "org_default",
     ) -> bool:
-        for policy in self._enabled_by_type("document_access"):
+        organization_id = user.organization_id if user else organization_id
+        for policy in self._enabled_by_type("document_access", organization_id):
             conditions = policy.conditions
             roles = conditions.get("roles")
             policy_classification = conditions.get("classification")
@@ -88,22 +98,28 @@ class PolicyService:
                 return False
         return True
 
-    def tool_requires_approval(self, tool_name: str) -> bool:
-        for policy in self._enabled_by_type("tool_approval"):
+    def tool_requires_approval(
+        self, tool_name: str, organization_id: str = "org_default"
+    ) -> bool:
+        for policy in self._enabled_by_type("tool_approval", organization_id):
             if policy.conditions.get("tool_name") == tool_name:
                 return policy.effect == "approval_required"
         return False
 
-    def unsafe_content_blocks_tools(self, unsafe: bool) -> bool:
-        for policy in self._enabled_by_type("prompt_safety"):
+    def unsafe_content_blocks_tools(
+        self, unsafe: bool, organization_id: str = "org_default"
+    ) -> bool:
+        for policy in self._enabled_by_type("prompt_safety", organization_id):
             if policy.conditions.get("unsafe") is unsafe and policy.effect == "block":
                 return True
         return False
 
-    def _enabled_by_type(self, rule_type: str) -> list[PolicyRecord]:
+    def _enabled_by_type(
+        self, rule_type: str, organization_id: str
+    ) -> list[PolicyRecord]:
         return [
             policy
-            for policy in self.list_policies()
+            for policy in self.list_policies(organization_id)
             if policy.enabled and policy.rule_type == rule_type
         ]
 

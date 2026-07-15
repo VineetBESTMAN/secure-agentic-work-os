@@ -64,6 +64,55 @@ if [[ "$import_status" != "completed" ]]; then
   exit 1
 fi
 
+smoke_document_id="$(python -c "import json,sys; print(json.load(sys.stdin)['result']['document_ids'][0])" <<<"$job_json")"
+organizations_json="$(curl --fail --silent \
+  -H "Authorization: Bearer ${token}" \
+  http://127.0.0.1:8000/api/organizations)"
+verification_organization_id="$(python -c "import json,sys; print(next((o['organization_id'] for o in json.load(sys.stdin) if o['slug']=='docker-verification'), ''))" <<<"$organizations_json")"
+if [[ -z "$verification_organization_id" ]]; then
+  verification_organization_id="$(curl --fail --silent \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${token}" \
+    -d '{"name":"Docker Verification","slug":"docker-verification"}' \
+    http://127.0.0.1:8000/api/organizations \
+    | python -c "import json,sys; print(json.load(sys.stdin)['organization_id'])")"
+fi
+tenant_session="$(curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${token}" \
+  -d "{\"organization_id\":\"${verification_organization_id}\"}" \
+  http://127.0.0.1:8000/api/auth/switch-organization)"
+tenant_token="$(python -c "import json,sys; print(json.load(sys.stdin)['access_token'])" <<<"$tenant_session")"
+tenant_refresh_token="$(python -c "import json,sys; print(json.load(sys.stdin)['refresh_token'])" <<<"$tenant_session")"
+tenant_documents="$(curl --fail --silent \
+  -H "Authorization: Bearer ${tenant_token}" \
+  http://127.0.0.1:8000/api/documents/library)"
+tenant_contains_smoke="$(python -c "import json,sys; expected=sys.argv[1]; print(any(d['document_id']==expected for d in json.load(sys.stdin)))" "$smoke_document_id" <<<"$tenant_documents")"
+if [[ "$tenant_contains_smoke" == "True" ]]; then
+  echo "A default-organization document crossed the Docker tenant boundary." >&2
+  exit 1
+fi
+tenant_policy_count="$(curl --fail --silent \
+  -H "Authorization: Bearer ${tenant_token}" \
+  http://127.0.0.1:8000/api/policies \
+  | python -c "import json,sys; print(len(json.load(sys.stdin)))")"
+if [[ "$tenant_policy_count" -lt 3 ]]; then
+  echo "The Docker verification organization was not seeded with governance policies." >&2
+  exit 1
+fi
+curl --fail --silent \
+  -H "Content-Type: application/json" \
+  -d "{\"refresh_token\":\"${tenant_refresh_token}\"}" \
+  http://127.0.0.1:8000/api/auth/refresh >/dev/null
+replay_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -H "Content-Type: application/json" \
+  -d "{\"refresh_token\":\"${tenant_refresh_token}\"}" \
+  http://127.0.0.1:8000/api/auth/refresh)"
+if [[ "$replay_status" != "401" ]]; then
+  echo "A used refresh token was accepted a second time (HTTP ${replay_status})." >&2
+  exit 1
+fi
+
 citations_count="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${token}" \
@@ -152,7 +201,7 @@ if [[ "$completed_workflow_status" != "completed" || "$workflow_email_status" !=
   exit 1
 fi
 
-echo "Backend API, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
+echo "Backend API, tenant isolation, session rotation, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
 wait_http "http://127.0.0.1:5173" "Frontend preview"
 echo "Docker stack verification passed."
 echo "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."
