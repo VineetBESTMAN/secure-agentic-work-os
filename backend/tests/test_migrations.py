@@ -30,7 +30,11 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     assert "workflow_actions" in tables
     assert "runtime_observations" in tables
     assert "cost_budgets" in tables
-    assert revision == ("20260715_0004",)
+    assert "rag_evaluation_datasets" in tables
+    assert "rag_evaluation_cases" in tables
+    assert "rag_evaluation_runs" in tables
+    assert "rag_evaluation_results" in tables
+    assert revision == ("20260715_0005",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -45,7 +49,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert revision == ("20260715_0004",)
+    assert revision == ("20260715_0005",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -138,7 +142,7 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         ).fetchall()
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260715_0004",)
+    assert revision == ("20260715_0005",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
