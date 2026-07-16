@@ -1,15 +1,18 @@
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from app.core.config import get_settings
 from app.core.security import decode_access_token
 from app.models.schemas import MCPExecutionRequest, UserContext
 from app.services.mcp_gateway import mcp_gateway_service
+from app.services.openclaw import openclaw_service
 
 
 class WorkOSJWTVerifier:
@@ -17,7 +20,9 @@ class WorkOSJWTVerifier:
         try:
             user = decode_access_token(token)
         except HTTPException:
-            return None
+            user = openclaw_service.resolve_token(token)
+            if user is None:
+                return None
         return AccessToken(
             token=token,
             client_id=user.user_id,
@@ -28,6 +33,24 @@ class WorkOSJWTVerifier:
 
 
 settings = get_settings()
+
+
+def _transport_security_settings() -> TransportSecuritySettings:
+    hosts: set[str] = set()
+    origins: set[str] = set()
+    for url in (settings.mcp_server_url, settings.openclaw_mcp_internal_url):
+        parsed = urlparse(url)
+        if parsed.netloc:
+            hosts.add(parsed.netloc)
+        if parsed.scheme and parsed.netloc:
+            origins.add(f"{parsed.scheme}://{parsed.netloc}")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=sorted(hosts),
+        allowed_origins=sorted(origins),
+    )
+
+
 security_mcp = FastMCP(
     name="Secure Agentic Work OS",
     instructions=(
@@ -42,6 +65,7 @@ security_mcp = FastMCP(
     stateless_http=True,
     json_response=True,
     streamable_http_path="/mcp",
+    transport_security=_transport_security_settings(),
 )
 
 

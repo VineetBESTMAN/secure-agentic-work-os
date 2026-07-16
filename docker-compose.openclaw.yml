@@ -1,0 +1,117 @@
+services:
+  backend:
+    environment:
+      APP_OPENCLAW_MCP_INTERNAL_URL: http://backend:8000/protocol/mcp
+    networks:
+      default: {}
+      openclaw_mcp: {}
+
+  openclaw-state-init:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.6.6}
+    profiles: ["openclaw", "openclaw-tools"]
+    user: "0:0"
+    entrypoint:
+      ["sh", "-c", "install -d -m 0700 -o 1000 -g 1000 /state"]
+    command: []
+    volumes:
+      - openclaw_state:/state
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+
+  openclaw:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.6.6}
+    profiles: ["openclaw"]
+    user: "1000:1000"
+    entrypoint: ["node", "/opt/workos-openclaw/bootstrap.mjs"]
+    command: ["gateway", "--bind", "lan", "--port", "18789"]
+    environment: &openclaw-environment
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw-state
+      OPENCLAW_CONFIG_DIR: /run/openclaw
+      OPENCLAW_CONFIG_PATH: /run/openclaw/openclaw.json
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw-state/workspace
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      WORKOS_MCP_URL: http://backend:8000/protocol/mcp
+      WORKOS_MCP_TOOLS: ${OPENCLAW_WORKOS_TOOLS:-search_documents,create_task}
+      WORKOS_MCP_TOKEN_FILE: /run/secrets/openclaw_workos_token
+      OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/openclaw_gateway_token
+    secrets: &openclaw-secrets
+      - openclaw_workos_token
+      - openclaw_gateway_token
+    volumes: &openclaw-volumes
+      - openclaw_state:/home/node/.openclaw-state
+      - ./openclaw/bootstrap.mjs:/opt/workos-openclaw/bootstrap.mjs:ro
+    tmpfs:
+      - /run/openclaw:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=1777
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    init: true
+    restart: unless-stopped
+    networks:
+      - openclaw_mcp
+    depends_on:
+      backend:
+        condition: service_healthy
+      openclaw-state-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.6.6}
+    profiles: ["openclaw-tools"]
+    user: "1000:1000"
+    entrypoint: ["node", "/opt/workos-openclaw/bootstrap.mjs"]
+    environment: *openclaw-environment
+    secrets: *openclaw-secrets
+    volumes: *openclaw-volumes
+    tmpfs:
+      - /run/openclaw:rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0700
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=1777
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    init: true
+    networks:
+      - openclaw_mcp
+    depends_on:
+      backend:
+        condition: service_healthy
+      openclaw-state-init:
+        condition: service_completed_successfully
+
+secrets:
+  openclaw_workos_token:
+    file: ${OPENCLAW_WORKOS_TOKEN_FILE:-./.secrets/openclaw-workos-token}
+  openclaw_gateway_token:
+    file: ${OPENCLAW_GATEWAY_TOKEN_FILE:-./.secrets/openclaw-gateway-token}
+
+volumes:
+  openclaw_state:
+
+networks:
+  openclaw_mcp:
+    internal: true
