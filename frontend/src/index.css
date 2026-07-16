@@ -77,6 +77,7 @@ label {
 .sidebar {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: 22px;
   border-right: 1px solid #c8d1da;
   background: #f7f9fb;
@@ -113,6 +114,7 @@ small {
 
 .workspace {
   display: grid;
+  min-width: 0;
   gap: 18px;
   align-content: start;
   padding: 22px;
@@ -466,6 +468,13 @@ h2 {
   color: #276342;
 }
 
+.status-connected,
+.status-ready,
+.status-idle {
+  background: #dcefe5;
+  color: #276342;
+}
+
 .status-pending_approval,
 .status-waiting_for_approval,
 .status-pending,
@@ -477,9 +486,49 @@ h2 {
 .status-blocked,
 .status-rejected,
 .status-failed,
-.status-cancelled {
+.status-cancelled,
+.status-error,
+.status-disconnected,
+.status-not_configured {
   background: #f9e2dc;
   color: #923f2e;
+}
+
+.connector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.connector-actions {
+  flex-wrap: wrap;
+}
+
+.connector-actions button {
+  flex: 1 1 120px;
+}
+
+.danger-button {
+  border-color: #d7a296;
+  background: #fff4f1;
+  color: #8a3929;
+}
+
+.error-text {
+  color: #923f2e;
+}
+
+.connector-sync-list,
+.webhook-setup {
+  margin-top: 10px;
+}
+
+.webhook-setup code {
+  border-radius: 5px;
+  background: #edf4f3;
+  padding: 8px;
+  user-select: all;
 }
 
 .execution-card code,

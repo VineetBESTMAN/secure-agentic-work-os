@@ -140,7 +140,7 @@ fi
 email_execution="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${token}" \
-  -d '{"tool_name":"send_email","arguments":{"to":"client@example.com","subject":"Docker Security MCP verification","body":"This approved message must remain simulated."}}' \
+  -d '{"tool_name":"send_email","arguments":{"to":"client@example.com","subject":"Docker Security MCP verification","body":"This verification message must never be sent."}}' \
   http://127.0.0.1:8000/api/mcp/executions)"
 email_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$email_execution")"
 approval_id="$(python -c "import json,sys; print(json.load(sys.stdin).get('approval_id',''))" <<<"$email_execution")"
@@ -158,7 +158,7 @@ manager_token="$(curl --fail --silent \
 curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${manager_token}" \
-  -d '{"approved":true}' \
+  -d '{"approved":false}' \
   "http://127.0.0.1:8000/api/approvals/${approval_id}/decision" >/dev/null
 
 approved_execution="$(curl --fail --silent \
@@ -166,42 +166,25 @@ approved_execution="$(curl --fail --silent \
   "http://127.0.0.1:8000/api/mcp/executions/${execution_id}")"
 approved_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$approved_execution")"
 delivery_mode="$(python -c "import json,sys; print(json.load(sys.stdin)['result'].get('delivery_mode',''))" <<<"$approved_execution")"
-if [[ "$approved_status" != "completed" || "$delivery_mode" != "simulated" ]]; then
-  echo "Security MCP approval did not resume the exact simulated email execution." >&2
+if [[ "$approved_status" != "rejected" || -n "$delivery_mode" ]]; then
+  echo "Security MCP rejection did not prevent the real provider email action." >&2
   exit 1
 fi
 
 workflow="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${token}" \
-  -d '{"prompt":"Find the Acme renewal policy, create a verification task, and send a reply"}' \
+  -d '{"prompt":"Find the Acme renewal policy and create a verification task"}' \
   http://127.0.0.1:8000/api/agent/workflows)"
 workflow_id="$(python -c "import json,sys; print(json.load(sys.stdin)['workflow_id'])" <<<"$workflow")"
 workflow_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$workflow")"
-workflow_approval_id="$(python -c "import json,sys; print(next((a.get('approval_id','') for a in json.load(sys.stdin)['actions'] if a['status'] == 'waiting_for_approval'), ''))" <<<"$workflow")"
-if [[ "$workflow_status" != "waiting_for_approval" || -z "$workflow_approval_id" ]]; then
-  echo "Agent workflow did not execute safe actions and pause for approval." >&2
+workflow_email_count="$(python -c "import json,sys; print(sum(a['tool_name'] == 'send_email' for a in json.load(sys.stdin)['actions']))" <<<"$workflow")"
+if [[ "$workflow_status" != "completed" || "$workflow_email_count" -ne 0 ]]; then
+  echo "Agent workflow did not complete its provider-free safe actions." >&2
   exit 1
 fi
 
-curl --fail --silent \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ${manager_token}" \
-  -d '{"approved":true}' \
-  "http://127.0.0.1:8000/api/approvals/${workflow_approval_id}/decision" >/dev/null
-
-completed_workflow="$(curl --fail --silent \
-  -H "Authorization: Bearer ${token}" \
-  "http://127.0.0.1:8000/api/agent/workflows/${workflow_id}")"
-completed_workflow_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$completed_workflow")"
-workflow_email_status="$(python -c "import json,sys; print(next(a['status'] for a in json.load(sys.stdin)['actions'] if a['tool_name'] == 'send_email'))" <<<"$completed_workflow")"
-workflow_delivery_mode="$(python -c "import json,sys; print(next(a['result'].get('delivery_mode','') for a in json.load(sys.stdin)['actions'] if a['tool_name'] == 'send_email'))" <<<"$completed_workflow")"
-if [[ "$completed_workflow_status" != "completed" || "$workflow_email_status" != "completed" || "$workflow_delivery_mode" != "simulated" ]]; then
-  echo "Approval did not resume and complete the agent workflow." >&2
-  exit 1
-fi
-
-echo "Backend API, tenant isolation, session rotation, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
+echo "Backend API, tenant isolation, session rotation, Postgres, Redis worker, RAG, governed provider actions, and workflow smoke tests passed."
 wait_http "http://127.0.0.1:5173" "Frontend preview"
 echo "Docker stack verification passed."
 echo "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

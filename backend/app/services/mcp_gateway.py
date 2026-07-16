@@ -4,10 +4,11 @@ import math
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.core.config import get_settings
 from app.core.database import decode_json, encode_json, get_connection
@@ -22,6 +23,7 @@ from app.models.schemas import (
 )
 from app.services.approval import approval_service
 from app.services.audit import audit_service
+from app.services.connectors import connector_service
 from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
@@ -50,6 +52,50 @@ class SendEmailArguments(BaseModel):
         if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
             raise ValueError("to must be a valid email address")
         return value.lower()
+
+
+class CreateCalendarEventArguments(BaseModel):
+    summary: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=10_000)
+    start: datetime
+    end: datetime
+    timezone: str = Field(default="UTC", min_length=1, max_length=100)
+    attendees: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_schedule(self) -> "CreateCalendarEventArguments":
+        if self.end <= self.start:
+            raise ValueError("end must be later than start")
+        for attendee in self.attendees:
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", attendee):
+                raise ValueError("attendees must contain valid email addresses")
+        return self
+
+
+class SendSlackMessageArguments(BaseModel):
+    channel: str = Field(min_length=1, max_length=100)
+    text: str = Field(min_length=1, max_length=40_000)
+
+
+class CreateGitHubIssueArguments(BaseModel):
+    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(default="", max_length=65_000)
+    labels: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CreateJiraIssueArguments(BaseModel):
+    project_key: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,19}$")
+    summary: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=30_000)
+    issue_type: str = Field(default="Task", min_length=1, max_length=100)
+
+
+class CreateNotionPageArguments(BaseModel):
+    parent_id: str = Field(min_length=8, max_length=100)
+    parent_type: Literal["page_id", "database_id"] = "page_id"
+    title: str = Field(min_length=1, max_length=2_000)
+    content: str = Field(default="", max_length=20_000)
 
 
 class ExportDataArguments(BaseModel):
@@ -96,12 +142,57 @@ class MCPGatewayService:
                 ),
                 SecureTool(
                     name="send_email",
-                    description="Queue an approved email in safe simulation mode.",
+                    description="Send an approved email through the connected Gmail account.",
                     required_scope="email:send",
                     side_effect=True,
-                    approval_required=False,
+                    approval_required=True,
                     arguments_model=SendEmailArguments,
-                    handler=self._simulate_email,
+                    handler=self._send_email,
+                ),
+                SecureTool(
+                    name="create_calendar_event",
+                    description="Create an approved Google Calendar event.",
+                    required_scope="connectors:act",
+                    side_effect=True,
+                    approval_required=True,
+                    arguments_model=CreateCalendarEventArguments,
+                    handler=self._create_calendar_event,
+                ),
+                SecureTool(
+                    name="send_slack_message",
+                    description="Send an approved message through the connected Slack workspace.",
+                    required_scope="connectors:act",
+                    side_effect=True,
+                    approval_required=True,
+                    arguments_model=SendSlackMessageArguments,
+                    handler=self._send_slack_message,
+                ),
+                SecureTool(
+                    name="create_github_issue",
+                    description="Create an approved issue in a GitHub repository.",
+                    required_scope="connectors:act",
+                    side_effect=True,
+                    approval_required=True,
+                    arguments_model=CreateGitHubIssueArguments,
+                    handler=self._create_github_issue,
+                ),
+                SecureTool(
+                    name="create_jira_issue",
+                    description="Create an approved issue in the connected Jira site.",
+                    required_scope="connectors:act",
+                    side_effect=True,
+                    approval_required=True,
+                    arguments_model=CreateJiraIssueArguments,
+                    handler=self._create_jira_issue,
+                ),
+                SecureTool(
+                    name="create_notion_page",
+                    description="Create an approved page in the connected Notion workspace.",
+                    required_scope="connectors:act",
+                    side_effect=True,
+                    approval_required=True,
+                    arguments_model=CreateNotionPageArguments,
+                    handler=self._create_notion_page,
                 ),
                 SecureTool(
                     name="export_data",
@@ -668,17 +759,82 @@ class MCPGatewayService:
         }
 
     @staticmethod
-    def _simulate_email(
+    def _send_email(
         arguments: BaseModel, user: UserContext, execution_id: str
     ) -> dict[str, object]:
         payload = SendEmailArguments.model_validate(arguments)
-        return {
-            "delivery_mode": "simulated",
-            "delivery_status": "simulated",
-            "to": payload.to,
-            "subject": payload.subject,
-            "message": "Approval completed. No external email was sent.",
-        }
+        return connector_service.execute_action(
+            provider="google",
+            action="send_email",
+            arguments=payload.model_dump(mode="json"),
+            user=user,
+            execution_id=execution_id,
+        )
+
+    @staticmethod
+    def _create_calendar_event(
+        arguments: BaseModel, user: UserContext, execution_id: str
+    ) -> dict[str, object]:
+        payload = CreateCalendarEventArguments.model_validate(arguments)
+        return connector_service.execute_action(
+            provider="google",
+            action="create_calendar_event",
+            arguments=payload.model_dump(mode="json"),
+            user=user,
+            execution_id=execution_id,
+        )
+
+    @staticmethod
+    def _send_slack_message(
+        arguments: BaseModel, user: UserContext, execution_id: str
+    ) -> dict[str, object]:
+        payload = SendSlackMessageArguments.model_validate(arguments)
+        return connector_service.execute_action(
+            provider="slack",
+            action="send_slack_message",
+            arguments=payload.model_dump(mode="json"),
+            user=user,
+            execution_id=execution_id,
+        )
+
+    @staticmethod
+    def _create_github_issue(
+        arguments: BaseModel, user: UserContext, execution_id: str
+    ) -> dict[str, object]:
+        payload = CreateGitHubIssueArguments.model_validate(arguments)
+        return connector_service.execute_action(
+            provider="github",
+            action="create_github_issue",
+            arguments=payload.model_dump(mode="json"),
+            user=user,
+            execution_id=execution_id,
+        )
+
+    @staticmethod
+    def _create_jira_issue(
+        arguments: BaseModel, user: UserContext, execution_id: str
+    ) -> dict[str, object]:
+        payload = CreateJiraIssueArguments.model_validate(arguments)
+        return connector_service.execute_action(
+            provider="jira",
+            action="create_jira_issue",
+            arguments=payload.model_dump(mode="json"),
+            user=user,
+            execution_id=execution_id,
+        )
+
+    @staticmethod
+    def _create_notion_page(
+        arguments: BaseModel, user: UserContext, execution_id: str
+    ) -> dict[str, object]:
+        payload = CreateNotionPageArguments.model_validate(arguments)
+        return connector_service.execute_action(
+            provider="notion",
+            action="create_notion_page",
+            arguments=payload.model_dump(mode="json"),
+            user=user,
+            execution_id=execution_id,
+        )
 
     @staticmethod
     def _export_data(

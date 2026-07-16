@@ -1,9 +1,11 @@
 import anyio
 import httpx
+from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from app.core.crypto import encrypt_secret
 from app.core.database import encode_json, get_connection
 from app.main import app
 from app.services.mcp_protocol import security_mcp
@@ -104,7 +106,45 @@ def test_prompt_injection_text_is_blocked_before_side_effect() -> None:
     assert task is None
 
 
-def test_approval_resumes_exact_payload_and_prevents_self_approval() -> None:
+def test_approval_resumes_exact_payload_and_prevents_self_approval(monkeypatch) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE connector_accounts SET status = 'disconnected' WHERE provider = 'google' AND organization_id = 'org_default'"
+        )
+        connection.execute(
+            """
+            INSERT INTO connector_accounts (
+                connector_id, provider, account_label, status, scopes_json,
+                token_cipher, refresh_token_cipher, expires_at, created_by,
+                organization_id, external_account_id, metadata_json, updated_at
+            ) VALUES (?, 'google', ?, 'connected', ?, ?, ?, ?, 'u_admin',
+                      'org_default', ?, '{}', ?)
+            """,
+            (
+                "con_security_mcp_google",
+                "security-mcp@example.com",
+                encode_json(["https://www.googleapis.com/auth/gmail.send"]),
+                encrypt_secret("security-mcp-token"),
+                encrypt_secret("security-mcp-refresh"),
+                (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                "security-mcp-account",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/users/me/messages/send")
+        return httpx.Response(
+            200,
+            json={"id": "gmail_message_security", "threadId": "gmail_thread_security"},
+        )
+
+    monkeypatch.setattr(
+        "app.services.connector_providers.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
     execution = _create_execution(
         "send_email",
         {
@@ -138,7 +178,8 @@ def test_approval_resumes_exact_payload_and_prevents_self_approval() -> None:
     )
     assert completed.status_code == 200
     assert completed.json()["status"] == "completed"
-    assert completed.json()["result"]["delivery_mode"] == "simulated"
+    assert completed.json()["result"]["delivery_mode"] == "provider"
+    assert completed.json()["result"]["provider"] == "google"
     assert completed.json()["result"]["to"] == "client@example.com"
 
     duplicate = client.post(
@@ -212,6 +253,16 @@ def test_streamable_http_protocol_lists_real_mcp_tools() -> None:
                         result = await session.list_tools()
 
         tool_names = {tool.name for tool in result.tools}
-        assert {"search_documents", "create_task", "send_email", "export_data"} <= tool_names
+        assert {
+            "search_documents",
+            "create_task",
+            "send_email",
+            "create_calendar_event",
+            "send_slack_message",
+            "create_github_issue",
+            "create_jira_issue",
+            "create_notion_page",
+            "export_data",
+        } <= tool_names
 
     anyio.run(scenario)

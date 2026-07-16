@@ -127,10 +127,45 @@ type ConnectorRecord = {
   provider: string;
   display_name: string;
   configured: boolean;
-  status: "not_configured" | "ready" | "connected";
+  status: "not_configured" | "ready" | "connected" | "error" | "disconnected";
+  connector_id: string | null;
   account_label: string | null;
   connected_at: string | null;
+  expires_at: string | null;
+  last_sync_at: string | null;
+  last_error: string | null;
   scopes: string[];
+  resources: string[];
+  actions: string[];
+};
+
+type ConnectorSyncState = {
+  sync_state_id: string;
+  connector_id: string;
+  provider: string;
+  resource: string;
+  status: "idle" | "pending" | "running" | "completed" | "failed";
+  items_seen: number;
+  items_changed: number;
+  has_cursor: boolean;
+  last_started_at: string | null;
+  last_completed_at: string | null;
+  last_error: string | null;
+};
+
+type WebhookSubscription = {
+  subscription_id: string;
+  connector_id: string;
+  provider: string;
+  resource: string;
+  target: string | null;
+  remote_id: string | null;
+  registration_mode: "manual" | "remote";
+  status: "active" | "revoked" | "expired";
+  callback_url: string;
+  expires_at: string | null;
+  created_at: string | null;
+  secret: string | null;
 };
 
 type GoogleDriveFileRecord = {
@@ -321,6 +356,36 @@ const MCP_ARGUMENT_TEMPLATES: Record<string, Record<string, unknown>> = {
     subject: "Renewal follow-up",
     body: "The approved summary is ready for review.",
   },
+  create_calendar_event: {
+    summary: "Renewal review",
+    description: "Review the approved renewal summary.",
+    start: "2026-07-20T10:00:00+05:30",
+    end: "2026-07-20T10:30:00+05:30",
+    timezone: "Asia/Kolkata",
+    attendees: ["client@example.com"],
+  },
+  send_slack_message: {
+    channel: "C0123456789",
+    text: "The approved renewal summary is ready.",
+  },
+  create_github_issue: {
+    repository: "owner/repository",
+    title: "Review renewal automation",
+    body: "Created after Work OS approval.",
+    labels: ["work-os"],
+  },
+  create_jira_issue: {
+    project_key: "OPS",
+    summary: "Review renewal automation",
+    description: "Created after Work OS approval.",
+    issue_type: "Task",
+  },
+  create_notion_page: {
+    parent_id: "replace-with-page-or-database-id",
+    parent_type: "page_id",
+    title: "Renewal review",
+    content: "Created after Work OS approval.",
+  },
   export_data: { classification: "internal", limit: 25 },
 };
 
@@ -383,6 +448,9 @@ export default function App() {
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [connectors, setConnectors] = useState<ConnectorRecord[]>([]);
+  const [connectorSyncStates, setConnectorSyncStates] = useState<ConnectorSyncState[]>([]);
+  const [webhookSubscriptions, setWebhookSubscriptions] = useState<WebhookSubscription[]>([]);
+  const [latestWebhookSetup, setLatestWebhookSetup] = useState<WebhookSubscription | null>(null);
   const [driveFiles, setDriveFiles] = useState<GoogleDriveFileRecord[]>([]);
   const [driveNextPageToken, setDriveNextPageToken] = useState<string | null>(null);
   const [driveSearch, setDriveSearch] = useState("");
@@ -443,6 +511,9 @@ export default function App() {
     setMembers([]);
     setInvitations([]);
     setOidcProviders([]);
+    setConnectorSyncStates([]);
+    setWebhookSubscriptions([]);
+    setLatestWebhookSetup(null);
     localStorage.removeItem("workos_token");
     localStorage.removeItem("workos_refresh_token");
     localStorage.removeItem("workos_user");
@@ -501,6 +572,8 @@ export default function App() {
       documentData,
       approvalData,
       connectorData,
+      connectorSyncData,
+      webhookData,
       toolData,
       executionData,
       organizationData,
@@ -508,6 +581,8 @@ export default function App() {
       api<DocumentRecord[]>("/api/documents/library"),
       api<ApprovalRecord[]>("/api/approvals"),
       api<ConnectorRecord[]>("/api/connectors"),
+      api<ConnectorSyncState[]>("/api/connectors/sync-states"),
+      api<WebhookSubscription[]>("/api/connectors/webhook-subscriptions"),
       api<MCPToolDefinition[]>("/api/mcp/tools"),
       api<MCPExecutionRecord[]>("/api/mcp/executions"),
       api<OrganizationSummary[]>("/api/organizations"),
@@ -515,6 +590,8 @@ export default function App() {
     setDocuments(documentData);
     setApprovals(approvalData);
     setConnectors(connectorData);
+    setConnectorSyncStates(connectorSyncData);
+    setWebhookSubscriptions(webhookData);
     setMcpTools(toolData);
     setMcpExecutions(executionData);
     setOrganizations(organizationData);
@@ -779,6 +856,76 @@ export default function App() {
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Connector failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncConnector(connector: ConnectorRecord) {
+    setBusy(true);
+    try {
+      const result = await api<{
+        job: JobRecord;
+        states: ConnectorSyncState[];
+      }>(`/api/connectors/${connector.provider}/sync`, {
+        method: "POST",
+        body: JSON.stringify({ resources: connector.resources }),
+      });
+      setConnectorSyncStates((current) => [
+        ...current.filter((state) => state.connector_id !== connector.connector_id),
+        ...result.states,
+      ]);
+      setMessage(
+        `${connector.display_name} synced ${String(result.job.result.items_changed || 0)} changed items.`,
+      );
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Connector sync failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectConnector(connector: ConnectorRecord) {
+    if (!window.confirm(`Disconnect ${connector.display_name} and revoke its stored credentials?`)) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api<{ message: string }>(`/api/connectors/${connector.provider}`, {
+        method: "DELETE",
+      });
+      setMessage(result.message);
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Connector disconnect failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createWebhookSetup(connector: ConnectorRecord) {
+    const resource = connector.resources[0];
+    if (!resource) {
+      setMessage(`${connector.display_name} has no webhook-capable resource.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const setup = await api<WebhookSubscription>(
+        `/api/connectors/${connector.provider}/webhook-subscriptions`,
+        {
+          method: "POST",
+          body: JSON.stringify({ resource, register_remote: false }),
+        },
+      );
+      setLatestWebhookSetup(setup);
+      setWebhookSubscriptions((current) => [setup, ...current]);
+      setMessage(
+        `Webhook endpoint created for ${connector.display_name}. Copy the one-time secret now.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Webhook setup failed");
     } finally {
       setBusy(false);
     }
@@ -1114,6 +1261,8 @@ export default function App() {
 
   const googleConnector = connectors.find((connector) => connector.provider === "google");
   const googleDriveReady = googleConnector?.status === "connected";
+  const canManageConnectors = Boolean(user?.scopes.includes("connectors:manage"));
+  const canSyncConnectors = Boolean(user?.scopes.includes("connectors:sync"));
   const selectedMcpDefinition = mcpTools.find((tool) => tool.name === selectedMcpTool);
 
   return (
@@ -1875,19 +2024,93 @@ export default function App() {
             <div className="item-list">
               {connectors.map((connector) => (
                 <article key={connector.provider} className="item">
-                  <strong>{connector.display_name}</strong>
-                  <span>{connector.account_label || connector.status}</span>
-                  <button
-                    type="button"
-                    onClick={() => authorizeConnector(connector.provider)}
-                    disabled={!token || busy}
-                  >
-                    <Plug size={16} />
-                    Authorize
-                  </button>
+                  <div className="connector-heading">
+                    <strong>{connector.display_name}</strong>
+                    <span className={`status-pill status-${connector.status}`}>
+                      {connector.status.replaceAll("_", " ")}
+                    </span>
+                  </div>
+                  <span>{connector.account_label || "No connected account"}</span>
+                  <small>Sync: {connector.resources.join(", ") || "none"}</small>
+                  <small>Actions: {connector.actions.join(", ") || "none"}</small>
+                  {connector.last_sync_at && <small>Last sync: {connector.last_sync_at}</small>}
+                  {connector.last_error && <small className="error-text">{connector.last_error}</small>}
+                  <div className="button-row connector-actions">
+                    <button
+                      type="button"
+                      onClick={() => authorizeConnector(connector.provider)}
+                      disabled={!token || busy || !canManageConnectors}
+                    >
+                      <Plug size={16} />
+                      {connector.status === "connected" ? "Reconnect" : "Authorize"}
+                    </button>
+                    {connector.status === "connected" && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => syncConnector(connector)}
+                          disabled={busy || !canSyncConnectors || connector.resources.length === 0}
+                        >
+                          <RefreshCw size={16} />
+                          Sync now
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => createWebhookSetup(connector)}
+                          disabled={busy || !canManageConnectors || connector.resources.length === 0}
+                        >
+                          Webhook
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={() => disconnectConnector(connector)}
+                          disabled={busy || !canManageConnectors}
+                        >
+                          <XCircle size={16} />
+                          Disconnect
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </article>
               ))}
             </div>
+            {connectorSyncStates.length > 0 && (
+              <div className="item-list compact connector-sync-list">
+                {connectorSyncStates.map((state) => (
+                  <article key={state.sync_state_id} className="item">
+                    <div className="connector-heading">
+                      <strong>{state.provider} / {state.resource}</strong>
+                      <span className={`status-pill status-${state.status}`}>{state.status}</span>
+                    </div>
+                    <small>
+                      {state.items_changed} changed of {state.items_seen} seen
+                      {state.has_cursor ? " · incremental cursor active" : ""}
+                    </small>
+                    {state.last_error && <small className="error-text">{state.last_error}</small>}
+                  </article>
+                ))}
+              </div>
+            )}
+            {latestWebhookSetup && (
+              <article className="item webhook-setup">
+                <strong>One-time webhook setup</strong>
+                <small>Callback URL</small>
+                <code>{latestWebhookSetup.callback_url}</code>
+                <small>Signing secret — shown only once</small>
+                <code>{latestWebhookSetup.secret}</code>
+                <button type="button" onClick={() => setLatestWebhookSetup(null)}>
+                  I saved these values
+                </button>
+              </article>
+            )}
+            {webhookSubscriptions.length > 0 && (
+              <small>
+                {webhookSubscriptions.filter((subscription) => subscription.status === "active").length}
+                {" active verified webhook endpoint(s)"}
+              </small>
+            )}
             <label>
               Search Google Drive
               <input

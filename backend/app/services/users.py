@@ -20,6 +20,10 @@ DEMO_PASSWORD = "demo-password"
 DEFAULT_ORGANIZATION_ID = "org_default"
 DEFAULT_ORGANIZATION_SLUG = "default"
 ALL_SCOPES = {
+    "connectors:act",
+    "connectors:manage",
+    "connectors:read",
+    "connectors:sync",
     "documents:read",
     "documents:write",
     "tasks:write",
@@ -31,8 +35,15 @@ ALL_SCOPES = {
 }
 ROLE_DEFAULT_SCOPES = {
     "admin": sorted(ALL_SCOPES),
-    "manager": ["audit:read", "documents:read", "documents:write", "tasks:write"],
-    "employee": ["documents:read", "documents:write"],
+    "manager": [
+        "audit:read",
+        "connectors:read",
+        "connectors:sync",
+        "documents:read",
+        "documents:write",
+        "tasks:write",
+    ],
+    "employee": ["connectors:read", "documents:read", "documents:write"],
 }
 
 DEMO_USERS = (

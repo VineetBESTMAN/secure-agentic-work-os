@@ -1,5 +1,9 @@
+from datetime import datetime, timedelta, timezone
+
+import httpx
 from fastapi.testclient import TestClient
 
+from app.core.crypto import encrypt_secret
 from app.core.database import encode_json, get_connection
 from app.main import app
 from app.services.workflows import workflow_service
@@ -27,7 +31,45 @@ def _create_workflow(prompt: str) -> dict:
     return response.json()
 
 
-def test_workflow_executes_safe_actions_then_resumes_after_approval() -> None:
+def test_workflow_executes_safe_actions_then_resumes_after_approval(monkeypatch) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE connector_accounts SET status = 'disconnected' WHERE provider = 'google' AND organization_id = 'org_default'"
+        )
+        connection.execute(
+            """
+            INSERT INTO connector_accounts (
+                connector_id, provider, account_label, status, scopes_json,
+                token_cipher, refresh_token_cipher, expires_at, created_by,
+                organization_id, external_account_id, metadata_json, updated_at
+            ) VALUES (?, 'google', ?, 'connected', ?, ?, ?, ?, 'u_admin',
+                      'org_default', ?, '{}', ?)
+            """,
+            (
+                "con_workflow_google",
+                "workflow@example.com",
+                encode_json(["https://www.googleapis.com/auth/gmail.send"]),
+                encrypt_secret("workflow-google-token"),
+                encrypt_secret("workflow-google-refresh"),
+                (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                "workflow-google-account",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/users/me/messages/send")
+        return httpx.Response(
+            200,
+            json={"id": "gmail_workflow_message", "threadId": "gmail_workflow_thread"},
+        )
+
+    monkeypatch.setattr(
+        "app.services.connector_providers.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
     admin_headers = _auth_headers()
     workflow = _create_workflow(
         "Find the workflow approval policy, create a launch task, and send a reply"
@@ -85,7 +127,8 @@ def test_workflow_executes_safe_actions_then_resumes_after_approval() -> None:
     body = completed.json()
     assert body["status"] == "completed"
     assert all(action["status"] == "completed" for action in body["actions"])
-    assert body["actions"][-1]["result"]["delivery_mode"] == "simulated"
+    assert body["actions"][-1]["result"]["delivery_mode"] == "provider"
+    assert body["actions"][-1]["result"]["external_id"] == "gmail_workflow_message"
 
 
 def test_rejection_blocks_workflow_and_cancellation_closes_pending_approval() -> None:

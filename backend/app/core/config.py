@@ -92,6 +92,28 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8000/api/connectors",
         validation_alias="APP_OAUTH_REDIRECT_BASE_URL",
     )
+    connector_webhook_base_url: str = Field(
+        default="http://127.0.0.1:8000/api/connectors/webhooks",
+        validation_alias="APP_CONNECTOR_WEBHOOK_BASE_URL",
+    )
+    connector_oauth_state_ttl_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=3600,
+        validation_alias="APP_CONNECTOR_OAUTH_STATE_TTL_SECONDS",
+    )
+    connector_request_timeout_seconds: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=120.0,
+        validation_alias="APP_CONNECTOR_REQUEST_TIMEOUT_SECONDS",
+    )
+    connector_sync_max_items: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        validation_alias="APP_CONNECTOR_SYNC_MAX_ITEMS",
+    )
     google_client_id: str | None = Field(default=None, validation_alias="GOOGLE_CLIENT_ID")
     google_client_secret: str | None = Field(
         default=None, validation_alias="GOOGLE_CLIENT_SECRET"

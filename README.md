@@ -2,7 +2,7 @@
 
 Secure Agentic AI Work OS is a working reference implementation of an enterprise AI copilot. It combines document ingestion and retrieval, approval-gated agent workflows, role-based access, auditable tool execution, background jobs, and a standards-compatible MCP security gateway.
 
-The application runs locally with Docker Compose and supports testing with real uploaded documents. High-risk side effects remain safely simulated.
+The application runs locally with Docker Compose and supports testing with real uploaded documents and provider accounts. High-risk external side effects require a separate approval and execute only through an explicitly connected provider.
 
 ## Implemented capabilities
 
@@ -16,10 +16,13 @@ The application runs locally with Docker Compose and supports testing with real 
 - Prompt-injection detection for uploaded content and tool arguments
 - Redis/RQ jobs for uploads, re-indexing, and connector imports
 - Durable agent workflows with action state, retries, cancellation, approvals, and idempotency
-- Authenticated MCP tools for document search, task creation, email simulation, and data export
+- Authenticated MCP tools for document search, task creation, data export, Gmail, Calendar, Slack, GitHub, Jira, and Notion actions
 - Approval records bound to immutable payload hashes with replay protection
-- Google Drive OAuth browsing and selected-file import into the document library
-- Policy evaluation, job monitoring, approvals, connector status, and audit visibility in the React UI
+- OAuth authorization-code flows with expiring PKCE state, encrypted tokens, refresh-token rotation, provider revocation, and secure disconnect
+- Incremental Gmail, Calendar, Slack, GitHub, Jira, and Notion synchronization with encrypted cursors and RAG document updates
+- Signed webhook endpoints with replay protection, provider delivery IDs, and pending-sync state
+- Google Drive browsing and selected-file import into the document library
+- Policy evaluation, job monitoring, approvals, connector sync, webhook setup, and audit visibility in the React UI
 - Persistent RAG, embedding, and MCP runtime telemetry with latency, reliability, and cost summaries
 - Persistent RAG evaluation datasets with local-versus-OpenAI quality comparisons
 - Daily or monthly cost budgets with warning thresholds and preflight enforcement for priced providers
@@ -40,7 +43,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - SQLAlchemy persistence managed by Alembic migrations
 - Local deterministic embeddings or optional OpenAI embeddings
 - Security MCP server exposed through Streamable HTTP
-- OAuth connector framework with a working Google Drive file flow
+- Production connector framework with provider-specific OAuth, sync, webhook, revocation, and action adapters
 - Runtime observability ledger and configurable provider-cost budgets
 - Curated RAG quality evaluation with per-case evidence and latency results
 - Tenant isolation across documents, workflows, MCP, approvals, connectors, jobs, policies, audit, telemetry, budgets, and RAG evaluations
@@ -119,9 +122,9 @@ All local demo users use the password `demo-password`.
 4. Ask a question whose answer appears in the uploaded file.
 5. Inspect the cited source passage and searchable chunks.
 6. Edit the document metadata, re-index it, or delete it to test the management lifecycle.
-7. Create an agent workflow containing `create a task and send a reply`.
-8. Sign in as `manager@demo.local` and approve the waiting email action.
-9. Confirm the workflow completes and the email result reports `delivery_mode: simulated`.
+7. Connect a Google Workspace account with Gmail send permission.
+8. Create an agent workflow containing `create a task and send a reply`.
+9. Sign in as `manager@demo.local`, approve the waiting email action, and confirm the result reports `delivery_mode: provider`.
 
 Uploaded content, extracted chunks, workflows, jobs, approvals, and audit records persist across container restarts through Docker volumes.
 
@@ -136,11 +139,11 @@ Uploaded content, extracted chunks, workflows, jobs, approvals, and audit record
 - High-risk email and export operations require a separate manager approval.
 - Requesters cannot approve their own actions.
 - Approvals are bound to the exact stored payload through a canonical SHA-256 hash.
-- Stable idempotency keys prevent duplicate tasks or simulated deliveries during retries.
+- Stable idempotency keys and provider action receipts prevent duplicate local tasks and unsafe automatic retries after ambiguous external deliveries.
 - Prompt guards flag suspicious instructions in documents and tool arguments.
 - Security-relevant activity is recorded in the audit log.
 
-Email delivery is intentionally simulated. The application does not send an external email during the approval demo.
+External actions never fall back to a fake success response. If the required provider is disconnected, expired, or missing permission, the governed execution fails with a reconnect or scope error and retains its audit trail.
 
 ## Organizations, invitations, and SSO
 
@@ -164,18 +167,21 @@ The Streamable HTTP MCP endpoint is:
 http://127.0.0.1:8000/protocol/mcp
 ```
 
-It accepts the same JWT bearer token as the REST API and exposes four structured tools:
+It accepts the same JWT bearer token as the REST API and exposes these structured tools:
 
 - `search_documents` runs with the server-owned `documents:read` scope.
 - `create_task` persists a task with the server-owned `tasks:write` scope.
-- `send_email` creates an approval request and completes in simulation mode after approval.
+- `send_email` sends through Gmail after a separate approval.
+- `create_calendar_event` creates a Google Calendar event after approval.
+- `send_slack_message` posts through Slack after approval.
+- `create_github_issue`, `create_jira_issue`, and `create_notion_page` create provider records after approval.
 - `export_data` creates an approval request before returning accessible document metadata.
 
 The server determines each required scope, validates and prompt-scans arguments, stores a canonical argument hash, and audits the execution. A client-supplied scope cannot reduce these controls.
 
 ## Agent workflows
 
-Each workflow action is a durable database record. Document search and task creation execute through the MCP gateway, while email pauses in `waiting_for_approval`. A manager decision updates the hash-bound MCP execution and resumes the parent workflow automatically.
+Each workflow action is a durable database record. Document search and task creation execute through the MCP gateway, while email pauses in `waiting_for_approval`. A manager decision updates the hash-bound MCP execution, sends through the connected Gmail account, and resumes the parent workflow automatically.
 
 The UI displays action attempts, approval IDs, MCP execution IDs, results, and failures. Workflows support safe resume, up to three retry attempts after failure, and cancellation. Idempotency keys reuse an existing execution instead of creating duplicate side effects.
 
@@ -251,17 +257,50 @@ APP_DEFAULT_DAILY_COST_LIMIT_USD=5
 
 The deterministic local embedding provider records latency and usage with zero provider cost. Telemetry write failures never interrupt the governed operation, while an exceeded enabled budget blocks the priced request before it reaches the provider.
 
-## Google Drive OAuth
+## Production connectors and real actions
 
-The Google connector can browse recent Drive files and import selected supported files into the RAG document library.
+The Connectors panel supports account authorization, incremental synchronization, webhook endpoint setup, token status, reconnect, and revocation. Configure each OAuth application with this callback pattern:
 
-1. Create a Google Cloud OAuth client and enable the Google Drive API.
-2. Register `http://127.0.0.1:8000/api/connectors/google/callback` as an authorized redirect URI.
-3. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in a root `.env` file.
-4. Restart the Docker stack.
-5. Authorize Google Workspace from the Connectors panel, browse files, and import the selected items.
+```text
+http://127.0.0.1:8000/api/connectors/{provider}/callback
+```
 
-The repository also contains OAuth configuration endpoints for GitHub, Slack, Notion, and Jira. Their UI status remains `not_configured` unless matching client credentials are supplied.
+Set the matching client credentials in the root `.env` file:
+
+```text
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+SLACK_CLIENT_ID=
+SLACK_CLIENT_SECRET=
+NOTION_CLIENT_ID=
+NOTION_CLIENT_SECRET=
+JIRA_CLIENT_ID=
+JIRA_CLIENT_SECRET=
+```
+
+Enable the API products and OAuth scopes shown by the provider's connector card:
+
+| Provider | Incremental data | Approval-gated actions |
+| --- | --- | --- |
+| Google Workspace | Gmail and Calendar, plus selected Drive imports | Gmail send and Calendar event creation |
+| Slack | Channel messages | Channel message send |
+| GitHub | Issues visible to the connected user | Repository issue creation |
+| Jira | Cloud issues | Issue creation |
+| Notion | Shared pages | Page creation |
+
+Tokens and refresh tokens are encrypted at rest. Expiring access tokens refresh automatically when the provider issued a refresh token. Disconnect always removes local credentials and also calls the provider's revocation API where one is available.
+
+Sync cursors are encrypted and scoped to the organization, connector, and resource. Changed items update their existing RAG documents in place; provider deletion events are recorded without automatically deleting retained workspace documents.
+
+Webhook creation returns a callback URL and a signing secret exactly once. GitHub, Google, and Jira can be registered remotely when the required target is supplied through the API. Slack and Notion callback URLs are configured in their app consoles. Incoming deliveries require a provider signature or channel token, reject stale Slack timestamps, deduplicate delivery IDs, and mark the corresponding resource for incremental sync.
+
+Set the externally reachable webhook base before registering provider webhooks:
+
+```text
+APP_CONNECTOR_WEBHOOK_BASE_URL=https://work-os.example.com/api/connectors/webhooks
+```
 
 ## Local development
 
@@ -322,7 +361,7 @@ or:
 bash scripts/verify_docker_stack.sh
 ```
 
-The verification scripts build the stack, check the Alembic revision, sign in, import a queued sample, query PostgreSQL/pgvector, execute the MCP approval lifecycle, complete an approval-resumed workflow, and confirm the frontend is reachable.
+The verification scripts build the stack, check the Alembic revision, sign in, import a queued sample, query PostgreSQL/pgvector, verify that a rejected provider action never executes, complete a provider-free workflow, and confirm the frontend is reachable.
 
 GitHub Actions run backend tests, an Alembic upgrade/downgrade round trip, the frontend production build, and `npm audit --audit-level=moderate` on pushes to `main` and on pull requests.
 
