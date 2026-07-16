@@ -219,6 +219,12 @@ class MCPGatewayService:
             for tool in self._tools.values()
         ]
 
+    def validate_arguments(
+        self, tool_name: str, raw_arguments: dict[str, object]
+    ) -> dict[str, object]:
+        """Validate planner output against the server-owned MCP tool contract."""
+        return self._validate_arguments(self._get_tool(tool_name), raw_arguments)
+
     def execute(
         self, request: MCPToolCallRequest, user: UserContext
     ) -> MCPToolCallResponse:

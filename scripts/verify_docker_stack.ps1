@@ -77,6 +77,13 @@ try {
     }
 
     $headers = @{ Authorization = "Bearer $($login.access_token)" }
+    $modelStatus = Invoke-RestMethod `
+        -Method Get `
+        -Uri "http://127.0.0.1:8000/api/models/status" `
+        -Headers $headers
+    if (-not $modelStatus.configured -or -not $modelStatus.grounded_answers_enabled) {
+        throw "Model gateway status did not report the deterministic grounded-answer path."
+    }
     $importBody = @{
         provider = "google"
         items = @(
@@ -194,6 +201,9 @@ try {
     if ($query.citations.Count -lt 1) {
         throw "RAG smoke test did not return a citation."
     }
+    if (-not $query.grounded -or $query.answer -notmatch "\[\d+\]") {
+        throw "Grounded RAG smoke test did not return a citation-marked answer."
+    }
 
     $taskBody = @{
         tool_name = "create_task"
@@ -268,6 +278,7 @@ try {
         -Body $workflowBody
     if (
         $workflow.status -ne "completed" -or
+        -not $workflow.plan.validated -or
         ($workflow.actions | Where-Object { $_.tool_name -eq "send_email" })
     ) {
         throw "Agent workflow did not complete its provider-free safe actions."

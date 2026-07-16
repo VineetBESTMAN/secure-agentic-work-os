@@ -103,6 +103,22 @@ type RagAnswer = {
     chunk_id: string | null;
     score: number | null;
   }[];
+  generation_mode: "openai" | "deterministic";
+  model: string;
+  grounded: boolean;
+  fallback_reason: string | null;
+};
+
+type ModelGatewayStatus = {
+  provider: "openai" | "deterministic";
+  model: string;
+  configured: boolean;
+  grounded_answers_enabled: boolean;
+  llm_planner_enabled: boolean;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  timeout_seconds: number;
+  max_retries: number;
 };
 
 type ApprovalRecord = {
@@ -215,12 +231,17 @@ type AgentWorkflowRecord = {
     | "cancelled";
   plan: {
     summary: string;
+    planner_mode: "openai" | "deterministic";
+    model: string;
+    validated: boolean;
+    fallback_reason: string | null;
     actions: {
       action_id: string;
       action_type: string;
       description: string;
       requires_approval: boolean;
       scope: string;
+      arguments: Record<string, unknown>;
     }[];
   };
   actions: {
@@ -461,6 +482,7 @@ export default function App() {
   const [mcpTools, setMcpTools] = useState<MCPToolDefinition[]>([]);
   const [mcpExecutions, setMcpExecutions] = useState<MCPExecutionRecord[]>([]);
   const [runtimeSummary, setRuntimeSummary] = useState<RuntimeSummary | null>(null);
+  const [modelGateway, setModelGateway] = useState<ModelGatewayStatus | null>(null);
   const [evaluationDatasets, setEvaluationDatasets] = useState<RagEvaluationDataset[]>([]);
   const [evaluationRuns, setEvaluationRuns] = useState<RagEvaluationRun[]>([]);
   const [evaluationName, setEvaluationName] = useState("RAG quality baseline");
@@ -514,6 +536,7 @@ export default function App() {
     setConnectorSyncStates([]);
     setWebhookSubscriptions([]);
     setLatestWebhookSetup(null);
+    setModelGateway(null);
     localStorage.removeItem("workos_token");
     localStorage.removeItem("workos_refresh_token");
     localStorage.removeItem("workos_user");
@@ -577,6 +600,7 @@ export default function App() {
       toolData,
       executionData,
       organizationData,
+      modelGatewayData,
     ] = await Promise.all([
       api<DocumentRecord[]>("/api/documents/library"),
       api<ApprovalRecord[]>("/api/approvals"),
@@ -586,6 +610,7 @@ export default function App() {
       api<MCPToolDefinition[]>("/api/mcp/tools"),
       api<MCPExecutionRecord[]>("/api/mcp/executions"),
       api<OrganizationSummary[]>("/api/organizations"),
+      api<ModelGatewayStatus>("/api/models/status"),
     ]);
     setDocuments(documentData);
     setApprovals(approvalData);
@@ -595,6 +620,7 @@ export default function App() {
     setMcpTools(toolData);
     setMcpExecutions(executionData);
     setOrganizations(organizationData);
+    setModelGateway(modelGatewayData);
     setWorkflows(await api<AgentWorkflowRecord[]>("/api/agent/workflows"));
     if (user?.scopes.includes("audit:read")) {
       setAuditEvents(await api<AuditEvent[]>("/api/audit/events"));
@@ -1558,7 +1584,12 @@ export default function App() {
               <ShieldCheck size={18} />
               <h2>Answer</h2>
             </div>
+            <div className="security-summary">
+              <span>{answer.grounded ? "Citation validated" : "Grounding unavailable"}</span>
+              <span>{answer.generation_mode} / {answer.model}</span>
+            </div>
             <p className="answer">{answer.answer}</p>
+            {answer.fallback_reason && <em>{answer.fallback_reason}</em>}
             <div className="citation-list">
               {answer.citations.map((citation) => (
                 <article key={citation.chunk_id || citation.document_id} className="item">
@@ -1690,6 +1721,23 @@ export default function App() {
                 <span>{runtimeSummary.input_units.toLocaleString()} input units</span>
               </article>
             </div>
+
+            {modelGateway && (
+              <div className="security-summary">
+                <span>
+                  Gateway: {modelGateway.provider} / {modelGateway.model}
+                </span>
+                <span>
+                  Grounded answers: {modelGateway.grounded_answers_enabled ? "enabled" : "disabled"}
+                </span>
+                <span>
+                  LLM planner: {modelGateway.llm_planner_enabled ? "enabled" : "deterministic"}
+                </span>
+                <span>
+                  {modelGateway.max_input_tokens} input / {modelGateway.max_output_tokens} output tokens
+                </span>
+              </div>
+            )}
 
             <div className="governance-grid">
               <div className="stack">
@@ -2249,6 +2297,10 @@ export default function App() {
                       max={Math.max(workflow.actions.length, 1)}
                     />
                     <small>{workflow.plan.summary}</small>
+                    <small>
+                      Planner: {workflow.plan.planner_mode} / {workflow.plan.model} | {workflow.plan.validated ? "server validated" : "unvalidated"}
+                    </small>
+                    {workflow.plan.fallback_reason && <em>{workflow.plan.fallback_reason}</em>}
                     <div className="workflow-timeline">
                       {workflow.actions.map((action) => (
                         <div key={action.action_instance_id} className="workflow-action">

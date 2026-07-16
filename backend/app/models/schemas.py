@@ -170,12 +170,16 @@ class Citation(BaseModel):
 
 
 class RagQuery(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=4_000)
 
 
 class RagAnswer(BaseModel):
     answer: str
     citations: list[Citation]
+    generation_mode: Literal["openai", "deterministic"] = "deterministic"
+    model: str = "evidence-extractive-v1"
+    grounded: bool = True
+    fallback_reason: str | None = None
 
 
 class RagEvaluationCaseCreate(BaseModel):
@@ -309,19 +313,42 @@ class ActionProposal(BaseModel):
         "create_task",
         "draft_reply",
         "send_email",
+        "create_calendar_event",
+        "send_slack_message",
+        "create_github_issue",
+        "create_jira_issue",
+        "create_notion_page",
+        "export_data",
     ]
     description: str
     requires_approval: bool
     scope: str
+    arguments: dict[str, object] = Field(default_factory=dict)
 
 
 class AgentPlanRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(min_length=1, max_length=4_000)
 
 
 class AgentPlanResponse(BaseModel):
     summary: str
     actions: list[ActionProposal]
+    planner_mode: Literal["openai", "deterministic"] = "deterministic"
+    model: str = "rules-v1"
+    validated: bool = True
+    fallback_reason: str | None = None
+
+
+class ModelGatewayStatus(BaseModel):
+    provider: Literal["openai", "deterministic"]
+    model: str
+    configured: bool
+    grounded_answers_enabled: bool
+    llm_planner_enabled: bool
+    max_input_tokens: int
+    max_output_tokens: int
+    timeout_seconds: float
+    max_retries: int
 
 
 class ApprovalRecord(BaseModel):
@@ -573,7 +600,7 @@ class GoogleDriveImportRequest(BaseModel):
 
 
 class AgentWorkflowRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(min_length=1, max_length=4_000)
 
 
 class WorkflowActionRecord(BaseModel):
@@ -638,7 +665,9 @@ class AgentWorkflowRecord(BaseModel):
 class RuntimeObservation(BaseModel):
     observation_id: str
     trace_id: str
-    operation_type: Literal["embedding", "rag_query", "mcp_tool"]
+    operation_type: Literal[
+        "embedding", "rag_query", "model_generation", "agent_plan", "mcp_tool"
+    ]
     actor_id: str
     provider: str
     model: str

@@ -10,11 +10,13 @@ The application runs locally with Docker Compose and supports testing with real 
 - Organizations, invitations, real user onboarding, tenant-scoped memberships, and stronger RBAC
 - Optional per-organization OIDC/SSO with discovery, PKCE, nonce validation, and encrypted client secrets
 - Persistent document uploads for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
-- Extraction, chunking, embeddings, semantic search, and cited RAG answers
+- Extraction, chunking, embeddings, semantic search, and claim-level grounded RAG answers
+- Central model gateway for structured outputs, retries, timeouts, token limits, provider switching, budgets, and telemetry
 - PostgreSQL with `pgvector` and HNSW indexing, plus a SQLite fallback for local development
 - Document inspection, metadata editing, re-indexing, deletion, and unsafe-content review
 - Prompt-injection detection for uploaded content and tool arguments
 - Redis/RQ jobs for uploads, re-indexing, and connector imports
+- Constrained LLM or deterministic planning with server-validated MCP tools, scopes, arguments, and approval requirements
 - Durable agent workflows with action state, retries, cancellation, approvals, and idempotency
 - Authenticated MCP tools for document search, task creation, data export, Gmail, Calendar, Slack, GitHub, Jira, and Notion actions
 - Approval records bound to immutable payload hashes with replay protection
@@ -44,7 +46,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Local deterministic embeddings or optional OpenAI embeddings
 - Security MCP server exposed through Streamable HTTP
 - Production connector framework with provider-specific OAuth, sync, webhook, revocation, and action adapters
-- Runtime observability ledger and configurable provider-cost budgets
+- Runtime observability ledger and configurable embedding/generation cost budgets
 - Curated RAG quality evaluation with per-case evidence and latency results
 - Tenant isolation across documents, workflows, MCP, approvals, connectors, jobs, policies, audit, telemetry, budgets, and RAG evaluations
 
@@ -216,6 +218,35 @@ APP_VECTOR_DIMENSIONS=384
 
 The configured OpenAI model receives a request for 384 output dimensions to match the pgvector schema. Re-index uploaded documents after changing the embedding provider or vector dimensions.
 
+## Grounded answers, model gateway, and constrained planning
+
+Retrieved passages can be turned into natural answers through the central model gateway. The answer schema requires every factual claim to cite a retrieved chunk ID and include an exact supporting quote; the server rejects unknown IDs or quotes absent from the cited passage before rendering numbered markers. Retrieved document content is treated as untrusted data. If model access is disabled, unavailable, over budget, or returns invalid grounding, an extractive deterministic answer is returned instead.
+
+The same gateway provides structured outputs, explicit provider/model selection, request timeouts, bounded retries, output-token limits, cost preflight, and runtime telemetry. OpenAI Responses requests set `store=false`. Deterministic mode remains the default and requires no API key:
+
+```text
+APP_MODEL_PROVIDER=deterministic
+APP_GROUNDED_ANSWERS_ENABLED=true
+APP_LLM_PLANNER_ENABLED=false
+```
+
+To enable OpenAI grounded generation and constrained planning, set:
+
+```text
+APP_MODEL_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_GENERATION_MODEL=gpt-5.6
+APP_LLM_PLANNER_ENABLED=true
+APP_MODEL_MAX_INPUT_TOKENS=16000
+OPENAI_GENERATION_TIMEOUT_SECONDS=30
+OPENAI_GENERATION_MAX_RETRIES=2
+OPENAI_GENERATION_MAX_OUTPUT_TOKENS=1200
+```
+
+Set the current input and output prices explicitly with `OPENAI_GENERATION_INPUT_COST_PER_MILLION_TOKENS` and `OPENAI_GENERATION_OUTPUT_COST_PER_MILLION_TOKENS`. A zero value records usage and latency without accruing an estimated provider cost.
+
+The LLM planner is proposal-only. Its allowed tool list is filtered by the active membership scopes, and the server validates every action against the MCP input schema. Scope and approval values are copied from server-owned tool definitions. Actual execution still occurs only through the MCP gateway, policies, immutable payload hashes, approvals, idempotency, audit records, and runtime telemetry. `GET /api/models/status` exposes non-secret gateway configuration to authenticated users.
+
 ## RAG quality evaluation
 
 Admins and managers can create persistent evaluation datasets from accessible, prompt-safe document chunks. Each answerable case declares expected document or chunk IDs, evidence facts, and a reference answer; unanswerable control cases declare no expected evidence. Dataset settings control corpus document IDs, top-K retrieval, and the minimum similarity score.
@@ -240,7 +271,7 @@ GET  /api/rag-evaluations/runs/{run_id}
 
 ## Runtime governance and cost budgets
 
-RAG queries, embedding batches, and terminal MCP tool executions write structured runtime observations with a shared trace ID, actor, provider/model label, outcome, latency, usage units, and estimated cost. Admins and managers can inspect 24-hour or custom-window summaries in the Runtime Governance dashboard or through:
+RAG queries, embedding batches, model generation, agent planning, and terminal MCP tool executions write structured runtime observations with a shared trace ID, actor, provider/model label, outcome, latency, usage units, and estimated cost. Admins and managers can inspect 24-hour or custom-window summaries in the Runtime Governance dashboard or through:
 
 ```text
 GET /api/observability/summary?hours=24
@@ -248,10 +279,12 @@ GET /api/observability/events?hours=24&limit=200
 GET /api/observability/budgets
 ```
 
-Admins can create, update, or remove daily and monthly budgets under `/api/observability/budgets`. Enabled budgets are checked before priced embedding requests. Provider prices change over time, so the repository deliberately does not hard-code a price; configure the current rate explicitly:
+Admins can create, update, or remove daily and monthly budgets under `/api/observability/budgets`. Enabled budgets are checked before priced embedding and generation requests. Provider prices change over time, so the repository deliberately does not hard-code a price; configure the current rates explicitly:
 
 ```text
 OPENAI_EMBEDDING_COST_PER_MILLION_TOKENS=0
+OPENAI_GENERATION_INPUT_COST_PER_MILLION_TOKENS=0
+OPENAI_GENERATION_OUTPUT_COST_PER_MILLION_TOKENS=0
 APP_DEFAULT_DAILY_COST_LIMIT_USD=5
 ```
 

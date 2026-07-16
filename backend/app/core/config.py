@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -77,6 +78,58 @@ class Settings(BaseSettings):
     openai_embedding_cost_per_million_tokens: float = Field(
         default=0.0,
         validation_alias="OPENAI_EMBEDDING_COST_PER_MILLION_TOKENS",
+    )
+    model_provider: Literal["deterministic", "openai"] = Field(
+        default="deterministic", validation_alias="APP_MODEL_PROVIDER"
+    )
+    openai_generation_model: str = Field(
+        default="gpt-5.6", validation_alias="OPENAI_GENERATION_MODEL"
+    )
+    openai_generation_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        validation_alias="OPENAI_GENERATION_TIMEOUT_SECONDS",
+    )
+    openai_generation_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias="OPENAI_GENERATION_MAX_RETRIES",
+    )
+    openai_generation_max_output_tokens: int = Field(
+        default=1_200,
+        ge=64,
+        le=32_000,
+        validation_alias="OPENAI_GENERATION_MAX_OUTPUT_TOKENS",
+    )
+    model_max_input_tokens: int = Field(
+        default=16_000,
+        ge=256,
+        le=1_000_000,
+        validation_alias="APP_MODEL_MAX_INPUT_TOKENS",
+    )
+    openai_generation_input_cost_per_million_tokens: float = Field(
+        default=0.0,
+        ge=0,
+        validation_alias="OPENAI_GENERATION_INPUT_COST_PER_MILLION_TOKENS",
+    )
+    openai_generation_output_cost_per_million_tokens: float = Field(
+        default=0.0,
+        ge=0,
+        validation_alias="OPENAI_GENERATION_OUTPUT_COST_PER_MILLION_TOKENS",
+    )
+    grounded_answers_enabled: bool = Field(
+        default=True, validation_alias="APP_GROUNDED_ANSWERS_ENABLED"
+    )
+    llm_planner_enabled: bool = Field(
+        default=False, validation_alias="APP_LLM_PLANNER_ENABLED"
+    )
+    llm_planner_max_actions: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        validation_alias="APP_LLM_PLANNER_MAX_ACTIONS",
     )
     default_daily_cost_limit_usd: float = Field(
         default=5.0,
