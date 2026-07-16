@@ -15,6 +15,8 @@ class UserContext(BaseModel):
     membership_id: str
     role: Literal["admin", "manager", "employee"]
     scopes: list[str] = Field(default_factory=list)
+    principal_type: Literal["user", "openclaw"] = "user"
+    integration_id: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -433,6 +435,58 @@ class MCPExecutionRecord(BaseModel):
     error: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class OpenClawClientCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    scopes: list[
+        Literal[
+            "documents:read",
+            "tasks:write",
+            "email:send",
+            "connectors:act",
+        ]
+    ] = Field(default_factory=lambda: ["documents:read"], min_length=1, max_length=4)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+    @model_validator(mode="after")
+    def validate_unique_scopes(self) -> "OpenClawClientCreateRequest":
+        if len(set(self.scopes)) != len(self.scopes):
+            raise ValueError("OpenClaw client scopes must be unique.")
+        return self
+
+
+class OpenClawClientRecord(BaseModel):
+    client_id: str
+    organization_id: str
+    name: str
+    actor_id: str
+    scopes: list[str]
+    status: Literal["active", "revoked", "expired"]
+    created_by: str
+    expires_at: str
+    last_used_at: str | None = None
+    revoked_at: str | None = None
+    rotated_at: str | None = None
+    created_at: str | None = None
+
+
+class OpenClawClientCredential(BaseModel):
+    client: OpenClawClientRecord
+    token: str
+    mcp_server_url: str
+    docker_mcp_server_url: str
+    openclaw_config: dict[str, object]
+    docker_openclaw_config: dict[str, object]
+
+
+class OpenClawIntegrationStatus(BaseModel):
+    configured_clients: int
+    active_clients: int
+    mcp_server_url: str
+    docker_mcp_server_url: str
+    credential_storage: Literal["sha256_hash_only"] = "sha256_hash_only"
+    container_isolation: Literal["separate_service"] = "separate_service"
 
 
 class PromptScanResult(BaseModel):

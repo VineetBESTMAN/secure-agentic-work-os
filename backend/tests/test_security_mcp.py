@@ -1,6 +1,7 @@
 import anyio
 import httpx
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from fastapi.testclient import TestClient
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -9,6 +10,8 @@ from app.core.crypto import encrypt_secret
 from app.core.database import encode_json, get_connection
 from app.main import app
 from app.services.mcp_protocol import security_mcp
+from app.models.schemas import OpenClawClientCreateRequest, UserContext
+from app.services.openclaw import openclaw_service
 
 
 client = TestClient(app)
@@ -233,7 +236,20 @@ def test_execution_visibility_is_limited_for_employees() -> None:
 
 
 def test_streamable_http_protocol_lists_real_mcp_tools() -> None:
-    headers = _auth_headers()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "admin@demo.local", "password": "demo-password"},
+    )
+    admin = UserContext.model_validate(login.json()["user"])
+    credential = openclaw_service.create_client(
+        OpenClawClientCreateRequest(
+            name=f"Protocol OpenClaw {uuid4().hex[:8]}",
+            scopes=["documents:read", "tasks:write"],
+            expires_in_days=1,
+        ),
+        admin,
+    )
+    headers = {"Authorization": f"Bearer {credential.token}"}
 
     async def scenario() -> None:
         transport = httpx.ASGITransport(app=app)
@@ -251,6 +267,10 @@ def test_streamable_http_protocol_lists_real_mcp_tools() -> None:
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         result = await session.list_tools()
+                        task = await session.call_tool(
+                            "create_task",
+                            {"title": f"OpenClaw protocol task {uuid4().hex[:8]}"},
+                        )
 
         tool_names = {tool.name for tool in result.tools}
         assert {
@@ -264,5 +284,19 @@ def test_streamable_http_protocol_lists_real_mcp_tools() -> None:
             "create_notion_page",
             "export_data",
         } <= tool_names
+        assert task.isError is False
+
+        with get_connection() as connection:
+            execution = connection.execute(
+                """
+                SELECT * FROM mcp_tool_executions
+                WHERE requested_by = ? AND tool_name = 'create_task'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (credential.client.actor_id,),
+            ).fetchone()
+        assert execution is not None
+        assert execution["status"] == "completed"
+        assert execution["organization_id"] == "org_default"
 
     anyio.run(scenario)

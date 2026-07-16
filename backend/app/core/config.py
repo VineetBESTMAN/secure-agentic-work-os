@@ -37,6 +37,22 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8000/protocol/mcp",
         validation_alias="APP_MCP_SERVER_URL",
     )
+    openclaw_mcp_internal_url: str = Field(
+        default="http://backend:8000/protocol/mcp",
+        validation_alias="APP_OPENCLAW_MCP_INTERNAL_URL",
+    )
+    openclaw_client_default_expiry_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        validation_alias="APP_OPENCLAW_CLIENT_DEFAULT_EXPIRY_DAYS",
+    )
+    openclaw_client_max_expiry_days: int = Field(
+        default=365,
+        ge=1,
+        le=3650,
+        validation_alias="APP_OPENCLAW_CLIENT_MAX_EXPIRY_DAYS",
+    )
     database_path: str = Field(
         default=str(BASE_DIR / "data" / "workos.db"),
         validation_alias="APP_DATABASE_PATH",

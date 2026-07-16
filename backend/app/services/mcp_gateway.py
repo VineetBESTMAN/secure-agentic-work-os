@@ -25,6 +25,7 @@ from app.services.approval import approval_service
 from app.services.audit import audit_service
 from app.services.connectors import connector_service
 from app.services.observability import observability_service
+from app.services.openclaw import openclaw_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
 from app.services.rag import rag_service
@@ -365,12 +366,14 @@ class MCPGatewayService:
         tool = self._get_tool(execution.tool_name)
         user = user_service.get_by_id(
             execution.requested_by, execution.organization_id
+        ) or openclaw_service.resolve_actor(
+            execution.requested_by, execution.organization_id
         )
         if user is None:
             execution = self._update_execution(
                 execution.execution_id,
                 status="failed",
-                error="The requesting user no longer exists.",
+                error="The requesting principal is no longer active.",
             )
             self._audit(execution, "mcp.execution_failed")
             self._observe_execution(execution)

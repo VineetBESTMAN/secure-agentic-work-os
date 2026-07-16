@@ -73,6 +73,45 @@ type OIDCProvider = {
   enabled: boolean;
 };
 
+type OpenClawScope =
+  | "documents:read"
+  | "tasks:write"
+  | "email:send"
+  | "connectors:act";
+
+type OpenClawClient = {
+  client_id: string;
+  organization_id: string;
+  name: string;
+  actor_id: string;
+  scopes: string[];
+  status: "active" | "revoked" | "expired";
+  created_by: string;
+  expires_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  rotated_at: string | null;
+  created_at: string | null;
+};
+
+type OpenClawCredential = {
+  client: OpenClawClient;
+  token: string;
+  mcp_server_url: string;
+  docker_mcp_server_url: string;
+  openclaw_config: Record<string, unknown>;
+  docker_openclaw_config: Record<string, unknown>;
+};
+
+type OpenClawStatus = {
+  configured_clients: number;
+  active_clients: number;
+  mcp_server_url: string;
+  docker_mcp_server_url: string;
+  credential_storage: "sha256_hash_only";
+  container_isolation: "separate_service";
+};
+
 type DocumentRecord = {
   document_id: string;
   title: string;
@@ -453,6 +492,16 @@ export default function App() {
   const [members, setMembers] = useState<OrganizationMember[]>([]);
   const [invitations, setInvitations] = useState<InvitationRecord[]>([]);
   const [oidcProviders, setOidcProviders] = useState<OIDCProvider[]>([]);
+  const [openClawClients, setOpenClawClients] = useState<OpenClawClient[]>([]);
+  const [openClawStatus, setOpenClawStatus] = useState<OpenClawStatus | null>(null);
+  const [latestOpenClawCredential, setLatestOpenClawCredential] =
+    useState<OpenClawCredential | null>(null);
+  const [openClawName, setOpenClawName] = useState("OpenClaw channels");
+  const [openClawExpiryDays, setOpenClawExpiryDays] = useState(30);
+  const [openClawScopes, setOpenClawScopes] = useState<OpenClawScope[]>([
+    "documents:read",
+    "tasks:write",
+  ]);
   const [newOrganizationName, setNewOrganizationName] = useState("");
   const [newOrganizationSlug, setNewOrganizationSlug] = useState("");
   const [invitationEmail, setInvitationEmail] = useState("");
@@ -533,6 +582,9 @@ export default function App() {
     setMembers([]);
     setInvitations([]);
     setOidcProviders([]);
+    setOpenClawClients([]);
+    setOpenClawStatus(null);
+    setLatestOpenClawCredential(null);
     setConnectorSyncStates([]);
     setWebhookSubscriptions([]);
     setLatestWebhookSetup(null);
@@ -638,6 +690,12 @@ export default function App() {
       setInvitations(
         await api<InvitationRecord[]>("/api/organizations/current/invitations"),
       );
+      const [openClawClientData, openClawStatusData] = await Promise.all([
+        api<OpenClawClient[]>("/api/openclaw/clients"),
+        api<OpenClawStatus>("/api/openclaw/status"),
+      ]);
+      setOpenClawClients(openClawClientData);
+      setOpenClawStatus(openClawStatusData);
       if (user?.role === "admin") {
         setOidcProviders(
           await api<OIDCProvider[]>("/api/organizations/current/oidc-providers"),
@@ -647,6 +705,8 @@ export default function App() {
       setMembers([]);
       setInvitations([]);
       setOidcProviders([]);
+      setOpenClawClients([]);
+      setOpenClawStatus(null);
     }
   }
 
@@ -1167,6 +1227,7 @@ export default function App() {
       persistSession(session);
       setSelectedDocument(null);
       setAnswer(null);
+      setLatestOpenClawCredential(null);
       setMessage(`Switched to ${session.user.organization_name}.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not switch organization");
@@ -1268,6 +1329,115 @@ export default function App() {
       setMessage(`OIDC provider ${provider.name} configured.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not configure OIDC");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleOpenClawScope(scope: OpenClawScope) {
+    setOpenClawScopes((current) =>
+      current.includes(scope)
+        ? current.filter((item) => item !== scope)
+        : [...current, scope],
+    );
+  }
+
+  async function createOpenClawClient(event: FormEvent) {
+    event.preventDefault();
+    if (openClawScopes.length === 0) {
+      setMessage("Select at least one OpenClaw scope.");
+      return;
+    }
+    setBusy(true);
+    setLatestOpenClawCredential(null);
+    try {
+      const credential = await api<OpenClawCredential>("/api/openclaw/clients", {
+        method: "POST",
+        body: JSON.stringify({
+          name: openClawName,
+          scopes: openClawScopes,
+          expires_in_days: openClawExpiryDays,
+        }),
+      });
+      setLatestOpenClawCredential(credential);
+      setOpenClawClients((current) => [credential.client, ...current]);
+      setOpenClawStatus((current) =>
+        current
+          ? {
+              ...current,
+              configured_clients: current.configured_clients + 1,
+              active_clients: current.active_clients + 1,
+            }
+          : current,
+      );
+      setMessage(
+        "OpenClaw credential created. Save the token now; Work OS stores only its hash.",
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not create OpenClaw client");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotateOpenClawClient(clientId: string) {
+    setBusy(true);
+    setLatestOpenClawCredential(null);
+    const wasActive = openClawClients.some(
+      (item) => item.client_id === clientId && item.status === "active",
+    );
+    try {
+      const credential = await api<OpenClawCredential>(
+        `/api/openclaw/clients/${clientId}/rotate`,
+        { method: "POST" },
+      );
+      setLatestOpenClawCredential(credential);
+      setOpenClawClients((current) =>
+        current.map((item) =>
+          item.client_id === clientId ? credential.client : item,
+        ),
+      );
+      if (!wasActive) {
+        setOpenClawStatus((current) =>
+          current
+            ? { ...current, active_clients: current.active_clients + 1 }
+            : current,
+        );
+      }
+      setMessage("OpenClaw token rotated. The previous token is invalid immediately.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not rotate OpenClaw client");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeOpenClawClient(clientId: string) {
+    setBusy(true);
+    setLatestOpenClawCredential(null);
+    const wasActive = openClawClients.some(
+      (item) => item.client_id === clientId && item.status === "active",
+    );
+    try {
+      const revoked = await api<OpenClawClient>(`/api/openclaw/clients/${clientId}`, {
+        method: "DELETE",
+      });
+      setOpenClawClients((current) =>
+        current.map((item) => (item.client_id === clientId ? revoked : item)),
+      );
+      if (wasActive) {
+        setOpenClawStatus((current) =>
+          current
+            ? {
+                ...current,
+                active_clients: Math.max(0, current.active_clients - 1),
+              }
+            : current,
+        );
+      }
+      setMessage("OpenClaw client revoked.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not revoke OpenClaw client");
     } finally {
       setBusy(false);
     }
@@ -1521,6 +1691,134 @@ export default function App() {
                 </div>
               </details>
             )}
+          </section>
+        )}
+
+        {(user?.role === "admin" || user?.role === "manager") && (
+          <section className="panel openclaw-console">
+            <div className="panel-title console-heading">
+              <div>
+                <Bot size={20} />
+                <div>
+                  <h2>OpenClaw MCP Integration</h2>
+                  <small>
+                    Tenant-scoped credentials for the isolated OpenClaw service
+                  </small>
+                </div>
+              </div>
+              <span className="protocol-badge">
+                {openClawStatus?.active_clients || 0} active
+              </span>
+            </div>
+            <div className="security-summary">
+              <span>Hash-only credential storage</span>
+              <span>Server-owned scopes and approvals</span>
+              <span>Separate internal-only container network</span>
+              <span>No database, secret-store, or host filesystem mount</span>
+            </div>
+
+            {user.role === "admin" && (
+              <form className="stack" onSubmit={createOpenClawClient}>
+                <div className="split three">
+                  <label>
+                    Client name
+                    <input
+                      required
+                      value={openClawName}
+                      onChange={(event) => setOpenClawName(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Expires in days
+                    <input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={openClawExpiryDays}
+                      onChange={(event) => setOpenClawExpiryDays(Number(event.target.value))}
+                    />
+                  </label>
+                  <button type="submit" disabled={busy || openClawScopes.length === 0}>
+                    <ShieldCheck size={16} />
+                    Create scoped credential
+                  </button>
+                </div>
+                <div className="security-summary">
+                  {(
+                    [
+                      "documents:read",
+                      "tasks:write",
+                      "email:send",
+                      "connectors:act",
+                    ] as OpenClawScope[]
+                  ).map((scope) => (
+                    <label key={scope} className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={openClawScopes.includes(scope)}
+                        onChange={() => toggleOpenClawScope(scope)}
+                      />
+                      {scope}
+                    </label>
+                  ))}
+                </div>
+              </form>
+            )}
+
+            {latestOpenClawCredential && (
+              <article className="openclaw-credential">
+                <strong>One-time credential — save it before leaving this page</strong>
+                <code>{latestOpenClawCredential.token}</code>
+                <small>
+                  Docker MCP URL: {latestOpenClawCredential.docker_mcp_server_url}
+                </small>
+                <pre>
+                  {JSON.stringify(latestOpenClawCredential.docker_openclaw_config, null, 2)}
+                </pre>
+              </article>
+            )}
+
+            <div className="item-list compact">
+              {openClawClients.map((openClawClient) => (
+                <article key={openClawClient.client_id} className="item">
+                  <div className="execution-title">
+                    <strong>{openClawClient.name}</strong>
+                    <span className={`status-pill status-${openClawClient.status}`}>
+                      {openClawClient.status}
+                    </span>
+                  </div>
+                  <span>{openClawClient.scopes.join(" | ")}</span>
+                  <small>Expires: {openClawClient.expires_at}</small>
+                  <small>
+                    Last used: {openClawClient.last_used_at || "never"}
+                  </small>
+                  {user.role === "admin" && openClawClient.status !== "revoked" && (
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void rotateOpenClawClient(openClawClient.client_id)}
+                      >
+                        <RotateCcw size={15} />
+                        Rotate
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={busy}
+                        onClick={() => void revokeOpenClawClient(openClawClient.client_id)}
+                      >
+                        <XCircle size={15} />
+                        Revoke
+                      </button>
+                    </div>
+                  )}
+                </article>
+              ))}
+              {openClawClients.length === 0 && (
+                <p className="empty">No OpenClaw clients configured for this tenant.</p>
+              )}
+            </div>
           </section>
         )}
 

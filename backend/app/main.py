@@ -15,6 +15,7 @@ from app.api.routes import (
     mcp,
     models,
     observability,
+    openclaw,
     organizations,
     policies,
     rag_evaluations,
@@ -67,6 +68,7 @@ app.include_router(approvals.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(mcp.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
+app.include_router(openclaw.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(policies.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")

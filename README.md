@@ -17,6 +17,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Prompt-injection detection for uploaded content and tool arguments
 - Redis/RQ jobs for uploads, re-indexing, and connector imports
 - Constrained LLM or deterministic planning with server-validated MCP tools, scopes, arguments, and approval requirements
+- Isolated OpenClaw service integration with tenant-bound, revocable MCP credentials and narrow tool filters
 - Durable agent workflows with action state, retries, cancellation, approvals, and idempotency
 - Authenticated MCP tools for document search, task creation, data export, Gmail, Calendar, Slack, GitHub, Jira, and Notion actions
 - Approval records bound to immutable payload hashes with replay protection
@@ -49,6 +50,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Runtime observability ledger and configurable embedding/generation cost budgets
 - Curated RAG quality evaluation with per-case evidence and latency results
 - Tenant isolation across documents, workflows, MCP, approvals, connectors, jobs, policies, audit, telemetry, budgets, and RAG evaluations
+- Optional OpenClaw Docker overlay with no database, Redis, Docker socket, repository, or host-filesystem access
 
 ### Data and infrastructure
 
@@ -92,13 +94,15 @@ docker compose ps
 
 Open `http://127.0.0.1:5173` after all services are healthy.
 
-The stack starts five containers:
+The base stack starts five containers:
 
 - `frontend`: serves the React application on port `5173`
 - `backend`: serves the FastAPI REST and MCP endpoints on port `8000`
 - `postgres`: persists application records and vector embeddings
 - `redis`: queues background work
 - `worker`: processes document and connector jobs from Redis
+
+An optional `openclaw` gateway and a one-shot state-volume initializer are defined in `docker-compose.openclaw.yml`. They start only after an administrator creates a scoped credential.
 
 Stop the stack without deleting persisted volumes:
 
@@ -186,6 +190,39 @@ The server determines each required scope, validates and prompt-scans arguments,
 Each workflow action is a durable database record. Document search and task creation execute through the MCP gateway, while email pauses in `waiting_for_approval`. A manager decision updates the hash-bound MCP execution, sends through the connected Gmail account, and resumes the parent workflow automatically.
 
 The UI displays action attempts, approval IDs, MCP execution IDs, results, and failures. Workflows support safe resume, up to three retry attempts after failure, and cancellation. Idempotency keys reuse an existing execution instead of creating duplicate side effects.
+
+## Secure OpenClaw integration
+
+OpenClaw connects to Secure Work OS as a Streamable HTTP MCP client. It receives a dedicated credential tied to one organization and an explicit subset of `documents:read`, `tasks:write`, `email:send`, and `connectors:act`. Work OS stores only the SHA-256 token hash. The raw token is returned once, expires, can be rotated or revoked immediately, and is not accepted by the normal REST API.
+
+OpenClaw tool calls still enter the same MCP gateway as every other client. Server-owned scopes, prompt-safety checks, organization isolation, policy evaluation, immutable argument hashes, human approval, provider execution, audit events, and runtime observations remain authoritative. An approval-gated request is revalidated against the active OpenClaw client before it can resume.
+
+The optional Docker overlay uses the pinned official OpenClaw image. Its root filesystem is read-only, Linux capabilities are dropped, `no-new-privileges` is enabled, and its generated MCP configuration lives in tmpfs. The container receives two read-only secret files, one read-only bootstrap file, and a named OpenClaw state volume. It does not receive application environment variables, database credentials, Redis access, the Docker socket, repository directories, or uploads. Its only application network is an internal bridge shared with the backend. A networkless one-shot initializer grants the non-root OpenClaw user access to the named volume; it receives no secrets.
+
+To configure it:
+
+1. Start the base stack and sign in as an organization administrator.
+2. In **OpenClaw MCP Integration**, create a client with the minimum required scopes. Save the one-time token.
+3. From PowerShell, run the secret setup helper and paste the token when prompted:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/configure_openclaw_secrets.ps1
+```
+
+4. Prove the official OpenClaw client can authenticate and discover only the configured tool filter:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.openclaw.yml --profile openclaw-tools run --rm openclaw-cli mcp probe secure-work-os --json
+```
+
+5. Start the isolated gateway and inspect its health:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.openclaw.yml --profile openclaw up -d
+docker compose -f docker-compose.yml -f docker-compose.openclaw.yml ps
+```
+
+The gateway port is not published to the host while the service uses the internal-only MCP network. Check it through Docker's health status and logs. The setup helper prints its randomly generated gateway token once. `OPENCLAW_WORKOS_TOOLS` must stay aligned with the scopes granted by Work OS; the default exposes only `search_documents` and `create_task`.
 
 ## Background jobs
 
