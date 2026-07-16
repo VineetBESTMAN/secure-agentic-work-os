@@ -217,7 +217,7 @@ try {
         arguments = @{
             to = "client@example.com"
             subject = "Docker Security MCP verification"
-            body = "This approved message must remain simulated."
+            body = "This verification message must never be sent."
         }
     } | ConvertTo-Json -Depth 4
     $emailExecution = Invoke-RestMethod `
@@ -245,20 +245,20 @@ try {
         -Uri "http://127.0.0.1:8000/api/approvals/$($emailExecution.approval_id)/decision" `
         -Headers $managerHeaders `
         -ContentType "application/json" `
-        -Body '{"approved":true}' | Out-Null
+        -Body '{"approved":false}' | Out-Null
     $approvedExecution = Invoke-RestMethod `
         -Method Get `
         -Uri "http://127.0.0.1:8000/api/mcp/executions/$($emailExecution.execution_id)" `
         -Headers $managerHeaders
     if (
-        $approvedExecution.status -ne "completed" -or
-        $approvedExecution.result.delivery_mode -ne "simulated"
+        $approvedExecution.status -ne "rejected" -or
+        $approvedExecution.result.delivery_mode
     ) {
-        throw "Security MCP approval did not resume the exact simulated email execution."
+        throw "Security MCP rejection did not prevent the real provider email action."
     }
 
     $workflowBody = @{
-        prompt = "Find the Acme renewal policy, create a verification task, and send a reply"
+        prompt = "Find the Acme renewal policy and create a verification task"
     } | ConvertTo-Json
     $workflow = Invoke-RestMethod `
         -Method Post `
@@ -266,37 +266,14 @@ try {
         -Headers $headers `
         -ContentType "application/json" `
         -Body $workflowBody
-    $workflowApproval = $workflow.actions | `
-        Where-Object { $_.status -eq "waiting_for_approval" } | `
-        Select-Object -First 1
     if (
-        $workflow.status -ne "waiting_for_approval" -or
-        -not $workflowApproval.approval_id
+        $workflow.status -ne "completed" -or
+        ($workflow.actions | Where-Object { $_.tool_name -eq "send_email" })
     ) {
-        throw "Agent workflow did not execute safe actions and pause for approval."
-    }
-    Invoke-RestMethod `
-        -Method Post `
-        -Uri "http://127.0.0.1:8000/api/approvals/$($workflowApproval.approval_id)/decision" `
-        -Headers $managerHeaders `
-        -ContentType "application/json" `
-        -Body '{"approved":true}' | Out-Null
-    $completedWorkflow = Invoke-RestMethod `
-        -Method Get `
-        -Uri "http://127.0.0.1:8000/api/agent/workflows/$($workflow.workflow_id)" `
-        -Headers $headers
-    $workflowEmail = $completedWorkflow.actions | `
-        Where-Object { $_.tool_name -eq "send_email" } | `
-        Select-Object -First 1
-    if (
-        $completedWorkflow.status -ne "completed" -or
-        $workflowEmail.status -ne "completed" -or
-        $workflowEmail.result.delivery_mode -ne "simulated"
-    ) {
-        throw "Approval did not resume and complete the agent workflow."
+        throw "Agent workflow did not complete its provider-free safe actions."
     }
 
-    Write-Host "Backend API, tenant isolation, session rotation, Postgres, Redis worker, RAG, Security MCP, and workflow smoke tests passed."
+    Write-Host "Backend API, tenant isolation, session rotation, Postgres, Redis worker, RAG, governed provider actions, and workflow smoke tests passed."
     Wait-Http -Url "http://127.0.0.1:5173" -Name "Frontend preview"
     Write-Host "Docker stack verification passed."
     Write-Host "Open http://127.0.0.1:5173 and sign in with admin@demo.local / demo-password."

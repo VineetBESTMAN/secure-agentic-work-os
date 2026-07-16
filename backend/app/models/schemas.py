@@ -417,10 +417,72 @@ class ConnectorRecord(BaseModel):
     provider: Literal["google", "github", "slack", "notion", "jira"]
     display_name: str
     configured: bool
-    status: Literal["not_configured", "ready", "connected"]
+    status: Literal["not_configured", "ready", "connected", "error", "disconnected"]
     scopes: list[str] = Field(default_factory=list)
+    connector_id: str | None = None
     account_label: str | None = None
     connected_at: str | None = None
+    expires_at: str | None = None
+    last_sync_at: str | None = None
+    last_error: str | None = None
+    resources: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+
+
+class ConnectorSyncStateRecord(BaseModel):
+    sync_state_id: str
+    connector_id: str
+    provider: str
+    resource: str
+    status: Literal["idle", "pending", "running", "completed", "failed"]
+    items_seen: int = 0
+    items_changed: int = 0
+    has_cursor: bool = False
+    last_started_at: str | None = None
+    last_completed_at: str | None = None
+    last_error: str | None = None
+
+
+class ConnectorSyncRequest(BaseModel):
+    resources: list[str] = Field(default_factory=list, max_length=10)
+    classification: Literal["public", "internal", "restricted"] = "internal"
+    owner_team: str = Field(default="workspace", min_length=1, max_length=120)
+
+
+class ConnectorDisconnectResponse(BaseModel):
+    provider: str
+    status: Literal["disconnected"] = "disconnected"
+    remote_revoked: bool
+    message: str
+
+
+class WebhookSubscriptionCreateRequest(BaseModel):
+    resource: str = Field(min_length=1, max_length=80)
+    target: str | None = Field(default=None, max_length=500)
+    register_remote: bool = False
+
+
+class WebhookSubscriptionRecord(BaseModel):
+    subscription_id: str
+    connector_id: str
+    provider: str
+    resource: str
+    target: str | None = None
+    remote_id: str | None = None
+    registration_mode: Literal["manual", "remote"]
+    status: Literal["active", "revoked", "expired"]
+    callback_url: str
+    expires_at: str | None = None
+    created_at: str | None = None
+    secret: str | None = None
+
+
+class WebhookDeliveryResponse(BaseModel):
+    accepted: bool = True
+    duplicate: bool = False
+    delivery_id: str
+    sync_requested: bool = True
+    challenge: str | None = None
 
 
 class OAuthStartResponse(BaseModel):
@@ -459,6 +521,11 @@ class JobRecord(BaseModel):
     created_by: str
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class ConnectorSyncResponse(BaseModel):
+    job: JobRecord
+    states: list[ConnectorSyncStateRecord] = Field(default_factory=list)
 
 
 class AsyncJobResponse(BaseModel):

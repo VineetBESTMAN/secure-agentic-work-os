@@ -98,7 +98,7 @@ def create_task(
 
 
 @security_mcp.tool(
-    description="Request an email send. The current implementation is approval-gated and simulated.",
+    description="Request an approval-gated email send through the connected Gmail account.",
     meta={
         "security": {
             "required_scope": "email:send",
@@ -110,6 +110,102 @@ def create_task(
 )
 def send_email(to: str, subject: str, body: str = "") -> dict[str, object]:
     return _execute("send_email", {"to": to, "subject": subject, "body": body})
+
+
+@security_mcp.tool(
+    description="Request an approval-gated Google Calendar event creation.",
+    meta={"security": {"required_scope": "connectors:act", "approval_required": True, "side_effect": True}},
+    structured_output=True,
+)
+def create_calendar_event(
+    summary: str,
+    start: str,
+    end: str,
+    description: str = "",
+    timezone: str = "UTC",
+    attendees: list[str] | None = None,
+) -> dict[str, object]:
+    return _execute(
+        "create_calendar_event",
+        {
+            "summary": summary,
+            "start": start,
+            "end": end,
+            "description": description,
+            "timezone": timezone,
+            "attendees": attendees or [],
+        },
+    )
+
+
+@security_mcp.tool(
+    description="Request an approval-gated Slack message.",
+    meta={"security": {"required_scope": "connectors:act", "approval_required": True, "side_effect": True}},
+    structured_output=True,
+)
+def send_slack_message(channel: str, text: str) -> dict[str, object]:
+    return _execute("send_slack_message", {"channel": channel, "text": text})
+
+
+@security_mcp.tool(
+    description="Request approval to create a GitHub issue.",
+    meta={"security": {"required_scope": "connectors:act", "approval_required": True, "side_effect": True}},
+    structured_output=True,
+)
+def create_github_issue(
+    repository: str,
+    title: str,
+    body: str = "",
+    labels: list[str] | None = None,
+) -> dict[str, object]:
+    return _execute(
+        "create_github_issue",
+        {"repository": repository, "title": title, "body": body, "labels": labels or []},
+    )
+
+
+@security_mcp.tool(
+    description="Request approval to create a Jira issue.",
+    meta={"security": {"required_scope": "connectors:act", "approval_required": True, "side_effect": True}},
+    structured_output=True,
+)
+def create_jira_issue(
+    project_key: str,
+    summary: str,
+    description: str = "",
+    issue_type: str = "Task",
+) -> dict[str, object]:
+    return _execute(
+        "create_jira_issue",
+        {
+            "project_key": project_key,
+            "summary": summary,
+            "description": description,
+            "issue_type": issue_type,
+        },
+    )
+
+
+@security_mcp.tool(
+    description="Request approval to create a Notion page.",
+    meta={"security": {"required_scope": "connectors:act", "approval_required": True, "side_effect": True}},
+    structured_output=True,
+)
+def create_notion_page(
+    parent_id: str,
+    title: str,
+    content: str = "",
+    parent_type: Literal["page_id", "database_id"] = "page_id",
+) -> dict[str, object]:
+    return _execute(
+        "create_notion_page",
+        {
+            "parent_id": parent_id,
+            "parent_type": parent_type,
+            "title": title,
+            "content": content,
+        },
+    )
 
 
 @security_mcp.tool(

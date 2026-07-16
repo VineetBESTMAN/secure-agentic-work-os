@@ -244,6 +244,83 @@ class RagService:
             ).fetchall()
         return [_row_to_document(row) for row in rows]
 
+    def replace_file_content(
+        self,
+        *,
+        document_id: str,
+        filename: str,
+        data: bytes,
+        classification: str,
+        owner_team: str,
+        uploaded_by: str,
+        organization_id: str = "org_default",
+    ) -> DocumentRecord:
+        """Replace a connector-managed document in place while preserving its identity."""
+        existing = self.get_document(
+            document_id=document_id, organization_id=organization_id
+        )
+        cleaned = _clean_text(_extract_text(filename=filename, data=data))
+        if not cleaned:
+            raise ValueError("No readable text was found in this file.")
+        chunks = _chunk_text(cleaned)
+        if not chunks:
+            raise ValueError("No searchable chunks could be created from this file.")
+
+        safe_filename = Path(filename).name or "connector-item.txt"
+        upload_dir = Path(get_settings().upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        new_path = upload_dir / f"{document_id}_{safe_filename}"
+        new_path.write_bytes(data)
+
+        scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        title = (
+            Path(safe_filename).stem.replace("_", " ").replace("-", " ").strip()
+            or safe_filename
+        )
+        with get_connection() as connection:
+            connection.execute(
+                "DELETE FROM document_chunks WHERE document_id = ? AND organization_id = ?",
+                (document_id, organization_id),
+            )
+            connection.execute(
+                """
+                UPDATE documents
+                SET title = ?, filename = ?, classification = ?, owner_team = ?,
+                    summary = ?, uploaded_by = ?, unsafe = ?, unsafe_reasons_json = ?
+                WHERE document_id = ? AND organization_id = ?
+                """,
+                (
+                    title,
+                    safe_filename,
+                    classification,
+                    owner_team,
+                    _summary(cleaned),
+                    uploaded_by,
+                    scan.flagged,
+                    encode_json(scan.reasons),
+                    document_id,
+                    organization_id,
+                ),
+            )
+            with observability_service.context(
+                uploaded_by, organization_id=organization_id
+            ):
+                self._insert_chunks(
+                    connection,
+                    document_id=document_id,
+                    chunks=chunks,
+                    organization_id=organization_id,
+                )
+
+        old_path = self._stored_file_path(
+            document_id=document_id, filename=existing.filename
+        )
+        if old_path != new_path and old_path.exists():
+            old_path.unlink()
+        return self.get_document(
+            document_id=document_id, organization_id=organization_id
+        )
+
     def get_document(
         self, document_id: str, organization_id: str = "org_default"
     ) -> DocumentRecord:

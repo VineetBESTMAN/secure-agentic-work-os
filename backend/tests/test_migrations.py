@@ -39,7 +39,12 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     assert "organization_invitations" in tables
     assert "auth_sessions" in tables
     assert "oidc_providers" in tables
-    assert revision == ("20260715_0006",)
+    assert "connector_sync_states" in tables
+    assert "connector_sync_items" in tables
+    assert "connector_webhook_subscriptions" in tables
+    assert "connector_webhook_deliveries" in tables
+    assert "connector_action_receipts" in tables
+    assert revision == ("20260715_0007",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -54,7 +59,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert revision == ("20260715_0006",)
+    assert revision == ("20260715_0007",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -154,9 +159,14 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         workflow_tenant = connection.execute(
             "SELECT organization_id FROM agent_workflows WHERE workflow_id = 'wf_existing'"
         ).fetchone()
+        membership_scopes = json.loads(
+            connection.execute(
+                "SELECT scopes_json FROM organization_memberships WHERE user_id = 'existing-user'"
+            ).fetchone()[0]
+        )
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260715_0006",)
+    assert revision == ("20260715_0007",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
@@ -165,3 +175,9 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
     assert organization == ("org_default", "default")
     assert membership == ("org_default", "existing-user", "admin")
     assert workflow_tenant == ("org_default",)
+    assert {
+        "connectors:read",
+        "connectors:manage",
+        "connectors:sync",
+        "connectors:act",
+    } <= set(membership_scopes)

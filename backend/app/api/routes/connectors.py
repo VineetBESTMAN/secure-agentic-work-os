@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.core.rbac import require_scope
 from app.core.security import get_current_user
@@ -7,9 +9,16 @@ from app.models.schemas import (
     ConnectorImportRequest,
     ConnectorImportResponse,
     ConnectorRecord,
+    ConnectorDisconnectResponse,
+    ConnectorSyncRequest,
+    ConnectorSyncResponse,
+    ConnectorSyncStateRecord,
     GoogleDriveFileListResponse,
     GoogleDriveImportRequest,
     OAuthStartResponse,
+    WebhookDeliveryResponse,
+    WebhookSubscriptionCreateRequest,
+    WebhookSubscriptionRecord,
 )
 from app.services.audit import audit_service
 from app.services.background_tasks import BackgroundQueueError, background_task_service
@@ -20,6 +29,7 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 @router.get("", response_model=list[ConnectorRecord])
 def list_connectors(user=Depends(get_current_user)) -> list[ConnectorRecord]:
+    require_scope(user.scopes, "connectors:read")
     audit_service.record(
         actor_id=user.user_id,
         event_type="connectors.list",
@@ -31,6 +41,7 @@ def list_connectors(user=Depends(get_current_user)) -> list[ConnectorRecord]:
 
 @router.post("/{provider}/authorize", response_model=OAuthStartResponse)
 def authorize_connector(provider: str, user=Depends(get_current_user)) -> OAuthStartResponse:
+    require_scope(user.scopes, "connectors:manage")
     try:
         response = connector_service.start_authorization(provider=provider, user=user)
     except ValueError as exc:
@@ -46,6 +57,164 @@ def authorize_connector(provider: str, user=Depends(get_current_user)) -> OAuthS
         organization_id=user.organization_id,
     )
     return response
+
+
+@router.delete("/{provider}", response_model=ConnectorDisconnectResponse)
+async def disconnect_connector(
+    provider: str, user=Depends(get_current_user)
+) -> ConnectorDisconnectResponse:
+    require_scope(user.scopes, "connectors:manage")
+    try:
+        response = await connector_service.disconnect(provider, user.organization_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.disconnect",
+        detail={"provider": provider, "remote_revoked": response.remote_revoked},
+        organization_id=user.organization_id,
+    )
+    return response
+
+
+@router.get("/sync-states", response_model=list[ConnectorSyncStateRecord])
+def list_connector_sync_states(
+    user=Depends(get_current_user),
+) -> list[ConnectorSyncStateRecord]:
+    require_scope(user.scopes, "connectors:read")
+    return connector_service.list_sync_states(user.organization_id)
+
+
+@router.post("/{provider}/sync", response_model=ConnectorSyncResponse)
+async def sync_connector(
+    provider: str,
+    payload: ConnectorSyncRequest,
+    user=Depends(get_current_user),
+) -> ConnectorSyncResponse:
+    require_scope(user.scopes, "connectors:sync")
+    try:
+        response = await connector_service.sync_connector(
+            provider=provider, payload=payload, user=user
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.sync",
+        detail={
+            "provider": provider,
+            "job_id": response.job.job_id,
+            "resources": payload.resources,
+            "items_changed": response.job.result.get("items_changed", 0),
+        },
+        organization_id=user.organization_id,
+    )
+    return response
+
+
+@router.get("/webhook-subscriptions", response_model=list[WebhookSubscriptionRecord])
+def list_webhook_subscriptions(
+    user=Depends(get_current_user),
+) -> list[WebhookSubscriptionRecord]:
+    require_scope(user.scopes, "connectors:read")
+    return connector_service.list_webhook_subscriptions(user.organization_id)
+
+
+@router.post(
+    "/{provider}/webhook-subscriptions",
+    response_model=WebhookSubscriptionRecord,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_webhook_subscription(
+    provider: str,
+    payload: WebhookSubscriptionCreateRequest,
+    user=Depends(get_current_user),
+) -> WebhookSubscriptionRecord:
+    require_scope(user.scopes, "connectors:manage")
+    try:
+        response = await connector_service.create_webhook_subscription(
+            provider=provider, payload=payload, user=user
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.webhook_created",
+        detail={
+            "provider": provider,
+            "resource": payload.resource,
+            "subscription_id": response.subscription_id,
+            "registration_mode": response.registration_mode,
+        },
+        organization_id=user.organization_id,
+    )
+    return response
+
+
+@router.delete(
+    "/webhook-subscriptions/{subscription_id}",
+    response_model=WebhookSubscriptionRecord,
+)
+def revoke_webhook_subscription(
+    subscription_id: str, user=Depends(get_current_user)
+) -> WebhookSubscriptionRecord:
+    require_scope(user.scopes, "connectors:manage")
+    try:
+        response = connector_service.revoke_webhook_subscription(
+            subscription_id, user.organization_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.webhook_revoked",
+        detail={"subscription_id": subscription_id},
+        organization_id=user.organization_id,
+    )
+    return response
+
+
+@router.post(
+    "/webhooks/{provider}/{subscription_id}",
+    response_model=WebhookDeliveryResponse,
+    include_in_schema=False,
+)
+async def receive_connector_webhook(
+    provider: str, subscription_id: str, request: Request
+) -> WebhookDeliveryResponse:
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook payload must be valid JSON.",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook payload must be a JSON object.",
+        )
+    try:
+        return connector_service.receive_webhook(
+            provider=provider,
+            subscription_id=subscription_id,
+            raw_body=raw_body,
+            headers=dict(request.headers),
+            payload=payload,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.post("/import", response_model=ConnectorImportResponse)
