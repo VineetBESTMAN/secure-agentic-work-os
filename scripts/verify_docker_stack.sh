@@ -40,6 +40,15 @@ token="$(curl --fail --silent \
   http://127.0.0.1:8000/api/auth/login \
   | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")"
 
+model_status="$(curl --fail --silent \
+  -H "Authorization: Bearer ${token}" \
+  http://127.0.0.1:8000/api/models/status)"
+model_ready="$(python -c "import json,sys; value=json.load(sys.stdin); print(value['configured'] and value['grounded_answers_enabled'])" <<<"$model_status")"
+if [[ "$model_ready" != "True" ]]; then
+  echo "Model gateway status did not report the deterministic grounded-answer path." >&2
+  exit 1
+fi
+
 queued_job_id="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${token}" \
@@ -113,15 +122,16 @@ if [[ "$replay_status" != "401" ]]; then
   exit 1
 fi
 
-citations_count="$(curl --fail --silent \
+query="$(curl --fail --silent \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${token}" \
   -d '{"question":"What approval is required for the Acme renewal?"}' \
-  http://127.0.0.1:8000/api/documents/query \
-  | python -c "import json,sys; print(len(json.load(sys.stdin)['citations']))")"
+  http://127.0.0.1:8000/api/documents/query)"
+citations_count="$(python -c "import json,sys; print(len(json.load(sys.stdin)['citations']))" <<<"$query")"
+grounded_answer="$(python -c "import json,re,sys; value=json.load(sys.stdin); print(value['grounded'] and bool(re.search(r'\[\d+\]', value['answer'])))" <<<"$query")"
 
-if [[ "$citations_count" -lt 1 ]]; then
-  echo "RAG smoke test did not return a citation." >&2
+if [[ "$citations_count" -lt 1 || "$grounded_answer" != "True" ]]; then
+  echo "Grounded RAG smoke test did not return a citation-marked answer." >&2
   exit 1
 fi
 
@@ -178,8 +188,9 @@ workflow="$(curl --fail --silent \
   http://127.0.0.1:8000/api/agent/workflows)"
 workflow_id="$(python -c "import json,sys; print(json.load(sys.stdin)['workflow_id'])" <<<"$workflow")"
 workflow_status="$(python -c "import json,sys; print(json.load(sys.stdin)['status'])" <<<"$workflow")"
+workflow_validated="$(python -c "import json,sys; print(json.load(sys.stdin)['plan']['validated'])" <<<"$workflow")"
 workflow_email_count="$(python -c "import json,sys; print(sum(a['tool_name'] == 'send_email' for a in json.load(sys.stdin)['actions']))" <<<"$workflow")"
-if [[ "$workflow_status" != "completed" || "$workflow_email_count" -ne 0 ]]; then
+if [[ "$workflow_status" != "completed" || "$workflow_validated" != "True" || "$workflow_email_count" -ne 0 ]]; then
   echo "Agent workflow did not complete its provider-free safe actions." >&2
   exit 1
 fi

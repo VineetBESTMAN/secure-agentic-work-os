@@ -22,6 +22,12 @@ TOOL_BY_ACTION = {
     "search_documents": "search_documents",
     "create_task": "create_task",
     "send_email": "send_email",
+    "create_calendar_event": "create_calendar_event",
+    "send_slack_message": "send_slack_message",
+    "create_github_issue": "create_github_issue",
+    "create_jira_issue": "create_jira_issue",
+    "create_notion_page": "create_notion_page",
+    "export_data": "export_data",
 }
 
 TERMINAL_ACTION_STATUSES = {"completed", "blocked", "failed", "cancelled", "skipped"}
@@ -91,7 +97,13 @@ class WorkflowService:
         audit_service.record(
             actor_id=user.user_id,
             event_type="agent.workflow_materialized",
-            detail={"workflow_id": workflow_id, "actions": len(plan.actions)},
+            detail={
+                "workflow_id": workflow_id,
+                "actions": len(plan.actions),
+                "planner_mode": plan.planner_mode,
+                "model": plan.model,
+                "validated": plan.validated,
+            },
             organization_id=user.organization_id,
         )
         return self.run_workflow(workflow_id, user)
@@ -548,6 +560,9 @@ class WorkflowService:
     def _build_arguments(
         self, workflow: AgentWorkflowRecord, action: WorkflowActionRecord
     ) -> dict[str, object]:
+        planned: dict[str, object] = {}
+        if action.sequence < len(workflow.plan.actions):
+            planned = dict(workflow.plan.actions[action.sequence].arguments)
         prior_answer = ""
         for prior in workflow.actions:
             if prior.sequence >= action.sequence:
@@ -557,20 +572,18 @@ class WorkflowService:
                 prior_answer = answer
 
         if action.tool_name == "search_documents":
-            return {"question": workflow.prompt}
+            planned.setdefault("question", workflow.prompt)
         if action.tool_name == "create_task":
             title = " ".join(workflow.prompt.split())[:180] or "Workflow follow-up"
-            return {
-                "title": title,
-                "description": prior_answer or workflow.prompt,
-            }
+            planned.setdefault("title", title)
+            if not planned.get("description"):
+                planned["description"] = prior_answer or workflow.prompt
         if action.tool_name == "send_email":
-            return {
-                "to": "client@example.com",
-                "subject": "Workflow follow-up",
-                "body": prior_answer or workflow.prompt,
-            }
-        raise ValueError(f"Workflow action has no tool adapter: {action.action_type}")
+            planned.setdefault("to", "client@example.com")
+            planned.setdefault("subject", "Workflow follow-up")
+            if not planned.get("body"):
+                planned["body"] = prior_answer or workflow.prompt
+        return mcp_gateway_service.validate_arguments(action.tool_name, planned)
 
     def _insert_actions(
         self,
@@ -580,10 +593,15 @@ class WorkflowService:
         now: str,
         organization_id: str,
     ) -> None:
+        definitions = {
+            tool.name: tool
+            for tool in mcp_gateway_service.list_tools(organization_id)
+        }
         for sequence, proposal in enumerate(plan.actions):
             tool_name = TOOL_BY_ACTION.get(proposal.action_type)
             if tool_name is None:
                 continue
+            definition = definitions[tool_name]
             connection.execute(
                 """
                 INSERT INTO workflow_actions (
@@ -601,8 +619,8 @@ class WorkflowService:
                     proposal.action_type,
                     tool_name,
                     proposal.description,
-                    proposal.scope,
-                    proposal.requires_approval,
+                    definition.required_scope,
+                    definition.approval_required,
                     "pending",
                     f"workflow:{workflow_id}:action:{sequence}",
                     now,

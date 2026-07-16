@@ -1,3 +1,5 @@
+import hashlib
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.security import get_current_user
@@ -17,7 +19,13 @@ def create_plan(
     audit_service.record(
         actor_id=user.user_id,
         event_type="agent.plan",
-        detail={"prompt": payload.prompt, "actions": len(plan.actions)},
+        detail={
+            "prompt_hash": hashlib.sha256(payload.prompt.encode("utf-8")).hexdigest(),
+            "actions": len(plan.actions),
+            "planner_mode": plan.planner_mode,
+            "model": plan.model,
+            "validated": plan.validated,
+        },
         organization_id=user.organization_id,
     )
     return plan

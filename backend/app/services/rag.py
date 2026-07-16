@@ -26,6 +26,7 @@ from app.models.schemas import (
     RagAnswer,
 )
 from app.services.embeddings import embedding_service
+from app.services.grounded_answers import grounded_answer_service
 from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
@@ -538,15 +539,11 @@ class RagService:
                             self._match_to_citation(score=score, row=row)
                             for score, row in top_matches
                         ]
-                        source_names = ", ".join(
-                            dict.fromkeys(citation.title for citation in citations)
-                        )
-                        answer = RagAnswer(
-                            answer=(
-                                "Based on the retrieved passages, the strongest sources "
-                                f"are: {source_names}."
-                            ),
+                        answer = grounded_answer_service.generate(
+                            question=question,
                             citations=citations,
+                            actor_id=actor_id,
+                            organization_id=organization_id,
                         )
             except Exception as exc:
                 observability_service.record_safely(
@@ -569,7 +566,12 @@ class RagService:
                 latency_ms=(time.perf_counter() - started) * 1_000,
                 input_units=max(1, math.ceil(len(question) / 4)),
                 output_units=len(answer.citations),
-                metadata={"role": role, "citation_count": len(answer.citations)},
+                metadata={
+                    "role": role,
+                    "citation_count": len(answer.citations),
+                    "generation_mode": answer.generation_mode,
+                    "grounded": answer.grounded,
+                },
                 trace_id=trace_id,
             )
             return answer
