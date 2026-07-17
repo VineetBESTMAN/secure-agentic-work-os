@@ -187,6 +187,7 @@ type ConnectorRecord = {
   account_label: string | null;
   connected_at: string | null;
   expires_at: string | null;
+  last_refresh_at: string | null;
   last_sync_at: string | null;
   last_error: string | null;
   scopes: string[];
@@ -221,6 +222,30 @@ type WebhookSubscription = {
   expires_at: string | null;
   created_at: string | null;
   secret: string | null;
+};
+
+type ConnectorValidationCheck = {
+  key: string;
+  label: string;
+  status: "passed" | "failed" | "pending" | "not_applicable";
+  message: string;
+  evidence: Record<string, unknown>;
+  checked_at: string;
+};
+
+type ConnectorValidationRun = {
+  validation_run_id: string;
+  connector_id: string | null;
+  provider: string;
+  status: "passed" | "incomplete" | "failed";
+  requested_by: string;
+  checks: ConnectorValidationCheck[];
+  passed_count: number;
+  failed_count: number;
+  pending_count: number;
+  not_applicable_count: number;
+  started_at: string;
+  completed_at: string;
 };
 
 type GoogleDriveFileRecord = {
@@ -520,6 +545,9 @@ export default function App() {
   const [connectors, setConnectors] = useState<ConnectorRecord[]>([]);
   const [connectorSyncStates, setConnectorSyncStates] = useState<ConnectorSyncState[]>([]);
   const [webhookSubscriptions, setWebhookSubscriptions] = useState<WebhookSubscription[]>([]);
+  const [connectorValidationRuns, setConnectorValidationRuns] = useState<
+    ConnectorValidationRun[]
+  >([]);
   const [latestWebhookSetup, setLatestWebhookSetup] = useState<WebhookSubscription | null>(null);
   const [driveFiles, setDriveFiles] = useState<GoogleDriveFileRecord[]>([]);
   const [driveNextPageToken, setDriveNextPageToken] = useState<string | null>(null);
@@ -649,6 +677,7 @@ export default function App() {
       connectorData,
       connectorSyncData,
       webhookData,
+      connectorValidationData,
       toolData,
       executionData,
       organizationData,
@@ -659,6 +688,7 @@ export default function App() {
       api<ConnectorRecord[]>("/api/connectors"),
       api<ConnectorSyncState[]>("/api/connectors/sync-states"),
       api<WebhookSubscription[]>("/api/connectors/webhook-subscriptions"),
+      api<ConnectorValidationRun[]>("/api/connectors/validation-runs"),
       api<MCPToolDefinition[]>("/api/mcp/tools"),
       api<MCPExecutionRecord[]>("/api/mcp/executions"),
       api<OrganizationSummary[]>("/api/organizations"),
@@ -669,6 +699,7 @@ export default function App() {
     setConnectors(connectorData);
     setConnectorSyncStates(connectorSyncData);
     setWebhookSubscriptions(webhookData);
+    setConnectorValidationRuns(connectorValidationData);
     setMcpTools(toolData);
     setMcpExecutions(executionData);
     setOrganizations(organizationData);
@@ -967,6 +998,38 @@ export default function App() {
       await refreshAll();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Connector sync failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function validateConnector(connector: ConnectorRecord, forceTokenRefresh = false) {
+    if (
+      forceTokenRefresh &&
+      !window.confirm(
+        `Force ${connector.display_name} to rotate its OAuth access token before read-only validation?`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api<ConnectorValidationRun>(
+        `/api/connectors/${connector.provider}/validation-runs`,
+        {
+          method: "POST",
+          body: JSON.stringify({ force_token_refresh: forceTokenRefresh }),
+        },
+      );
+      setConnectorValidationRuns((current) => [
+        result,
+        ...current.filter((run) => run.validation_run_id !== result.validation_run_id),
+      ]);
+      setMessage(
+        `${connector.display_name} validation is ${result.status}: ${result.passed_count} passed, ${result.failed_count} failed, ${result.pending_count} pending.`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Live validation failed");
     } finally {
       setBusy(false);
     }
@@ -2380,6 +2443,9 @@ export default function App() {
                   <small>Sync: {connector.resources.join(", ") || "none"}</small>
                   <small>Actions: {connector.actions.join(", ") || "none"}</small>
                   {connector.last_sync_at && <small>Last sync: {connector.last_sync_at}</small>}
+                  {connector.last_refresh_at && (
+                    <small>Last token refresh: {connector.last_refresh_at}</small>
+                  )}
                   {connector.last_error && <small className="error-text">{connector.last_error}</small>}
                   <div className="button-row connector-actions">
                     <button
@@ -2390,8 +2456,22 @@ export default function App() {
                       <Plug size={16} />
                       {connector.status === "connected" ? "Reconnect" : "Authorize"}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => validateConnector(connector)}
+                      disabled={!token || busy || !canSyncConnectors}
+                    >
+                      Validate live
+                    </button>
                     {connector.status === "connected" && (
                       <>
+                        <button
+                          type="button"
+                          onClick={() => validateConnector(connector, true)}
+                          disabled={busy || !canManageConnectors}
+                        >
+                          Validate + refresh
+                        </button>
                         <button
                           type="button"
                           onClick={() => syncConnector(connector)}
@@ -2419,6 +2499,35 @@ export default function App() {
                       </>
                     )}
                   </div>
+                  {(() => {
+                    const run = connectorValidationRuns.find(
+                      (candidate) => candidate.provider === connector.provider,
+                    );
+                    if (!run) return null;
+                    return (
+                      <details className="connector-validation">
+                        <summary>
+                          <span className={`status-pill status-${run.status}`}>{run.status}</span>
+                          {` ${run.passed_count} passed · ${run.failed_count} failed · ${run.pending_count} pending`}
+                        </summary>
+                        <small>
+                          Read-only probes do not retain provider content. Action checks use existing
+                          approval-gated MCP receipts and never trigger side effects.
+                        </small>
+                        <div className="validation-checks">
+                          {run.checks.map((check) => (
+                            <div key={check.key} className="validation-check">
+                              <span className={`status-pill status-${check.status}`}>
+                                {check.status.replaceAll("_", " ")}
+                              </span>
+                              <strong>{check.label}</strong>
+                              <small>{check.message}</small>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    );
+                  })()}
                 </article>
               ))}
             </div>

@@ -329,7 +329,7 @@ The deterministic local embedding provider records latency and usage with zero p
 
 ## Production connectors and real actions
 
-The Connectors panel supports account authorization, incremental synchronization, webhook endpoint setup, token status, reconnect, and revocation. Configure each OAuth application with this callback pattern:
+The Connectors panel supports account authorization, incremental synchronization, webhook endpoint setup, token status, reconnect, revocation, and persisted live validation. Configure each OAuth application with this callback pattern:
 
 ```text
 http://127.0.0.1:8000/api/connectors/{provider}/callback
@@ -340,6 +340,8 @@ Set the matching client credentials in the root `.env` file:
 ```text
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
+GOOGLE_PUBSUB_SERVICE_ACCOUNT=
+GOOGLE_PUBSUB_AUDIENCE=
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 SLACK_CLIENT_ID=
@@ -366,11 +368,26 @@ Sync cursors are encrypted and scoped to the organization, connector, and resour
 
 Webhook creation returns a callback URL and a signing secret exactly once. GitHub, Google, and Jira can be registered remotely when the required target is supplied through the API. Slack and Notion callback URLs are configured in their app consoles. Incoming deliveries require a provider signature or channel token, reject stale Slack timestamps, deduplicate delivery IDs, and mark the corresponding resource for incremental sync.
 
+For Gmail notifications, create an authenticated Pub/Sub push subscription for the returned callback URL. Set `GOOGLE_PUBSUB_SERVICE_ACCOUNT` to the exact push-auth service-account email and set `GOOGLE_PUBSUB_AUDIENCE` to the configured OIDC audience; when omitted, the audience defaults to the callback URL. Gmail deliveries are accepted only after the Google-signed OIDC token, issuer, audience, and service-account email are verified. Calendar watch notifications continue to use their high-entropy `X-Goog-Channel-Token`.
+
 Set the externally reachable webhook base before registering provider webhooks:
 
 ```text
 APP_CONNECTOR_WEBHOOK_BASE_URL=https://work-os.example.com/api/connectors/webhooks
 ```
+
+Use **Validate live** after connecting an account. It performs read-only identity and minimum-result API probes, compares granted scopes, and reports existing sync, signed-webhook, approval-gated action, disconnect, and revocation evidence. Validation records contain only safe metadata such as status, latency, counts, scope names, timestamps, and identity-match results; access tokens and provider content are never returned or persisted. Administrators can use **Validate + refresh** to explicitly exercise refresh-token rotation.
+
+A provider remains `incomplete` until its real developer application and account lifecycle have produced the required evidence. To complete validation without bypassing governance:
+
+1. Authorize the provider from the Connectors panel and run **Validate live**.
+2. Run each supported resource sync and configure the signed webhook callback in the provider console.
+3. Deliver a real signed webhook event.
+4. Request each external action through MCP and have a different manager approve it.
+5. Run **Validate + refresh** when the provider issued a refresh token.
+6. Disconnect once to prove local credential wiping and remote revocation, then reconnect for continued use.
+
+The validator never sends messages or creates provider records itself. It recognizes external actions only from completed connector receipts joined to an MCP execution with a recorded approval.
 
 ## Local development
 

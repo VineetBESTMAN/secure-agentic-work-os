@@ -504,6 +504,7 @@ class ConnectorRecord(BaseModel):
     account_label: str | None = None
     connected_at: str | None = None
     expires_at: str | None = None
+    last_refresh_at: str | None = None
     last_sync_at: str | None = None
     last_error: str | None = None
     resources: list[str] = Field(default_factory=list)
@@ -535,6 +536,34 @@ class ConnectorDisconnectResponse(BaseModel):
     status: Literal["disconnected"] = "disconnected"
     remote_revoked: bool
     message: str
+
+
+class ConnectorValidationRunRequest(BaseModel):
+    force_token_refresh: bool = False
+
+
+class ConnectorValidationCheck(BaseModel):
+    key: str
+    label: str
+    status: Literal["passed", "failed", "pending", "not_applicable"]
+    message: str
+    evidence: dict[str, object] = Field(default_factory=dict)
+    checked_at: str
+
+
+class ConnectorValidationRunRecord(BaseModel):
+    validation_run_id: str
+    connector_id: str | None = None
+    provider: str
+    status: Literal["passed", "incomplete", "failed"]
+    requested_by: str
+    checks: list[ConnectorValidationCheck] = Field(default_factory=list)
+    passed_count: int = 0
+    failed_count: int = 0
+    pending_count: int = 0
+    not_applicable_count: int = 0
+    started_at: str
+    completed_at: str
 
 
 class WebhookSubscriptionCreateRequest(BaseModel):

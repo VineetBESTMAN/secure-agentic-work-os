@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 import httpx
+from jose import JWTError, jwt
 
 from app.core.config import get_settings
 from app.core.crypto import decrypt_secret, encrypt_secret
@@ -34,6 +35,7 @@ from app.models.schemas import (
 )
 from app.services.connector_providers import (
     execute_provider_action,
+    probe_provider_access,
     provider_actions,
     provider_resources,
     register_provider_webhook,
@@ -97,7 +99,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "manage:jira-webhook",
             "offline_access",
         ],
-        "pkce": True,
+        "pkce": False,
     },
 }
 
@@ -150,6 +152,7 @@ class ConnectorService:
                     account_label=account["account_label"] if account else None,
                     connected_at=account["updated_at"] if account else None,
                     expires_at=self._string_or_none(account["expires_at"]) if account else None,
+                    last_refresh_at=self._string_or_none(account["last_refresh_at"]) if account else None,
                     last_sync_at=self._string_or_none(account["last_sync_at"]) if account else None,
                     last_error=account["last_error"] if account else None,
                     resources=provider_resources(provider),
@@ -218,6 +221,8 @@ class ConnectorService:
         if provider == "jira":
             query["audience"] = "api.atlassian.com"
             query["prompt"] = "consent"
+        if provider == "notion":
+            query["owner"] = "user"
 
         return OAuthStartResponse(
             provider=provider,
@@ -829,7 +834,7 @@ class ConnectorService:
             )
         return self.get_webhook_subscription(subscription_id, organization_id)
 
-    def receive_webhook(
+    async def receive_webhook(
         self,
         *,
         provider: str,
@@ -850,9 +855,18 @@ class ConnectorService:
         if subscription is None:
             raise ValueError("Webhook subscription is not active.")
         secret = decrypt_secret(subscription["secret_cipher"])
-        if not secret or not self._verify_webhook_signature(
-            provider=provider, secret=secret, raw_body=raw_body, headers=headers
-        ):
+        jira_binding_valid = provider != "jira" or self._jira_webhook_matches_subscription(
+            payload=payload, remote_id=subscription["remote_id"]
+        )
+        signature_valid = bool(secret) and await self._verify_webhook_signature(
+            provider=provider,
+            resource=subscription["resource"],
+            secret=secret or "",
+            raw_body=raw_body,
+            headers=headers,
+            callback_url=self._webhook_callback_url(provider, subscription_id),
+        )
+        if not jira_binding_valid or not signature_valid:
             raise PermissionError("Webhook signature verification failed.")
         payload_hash = hashlib.sha256(raw_body).hexdigest()
         external_delivery_id = self._external_delivery_id(
@@ -953,6 +967,52 @@ class ConnectorService:
         for row in rows:
             accounts.setdefault(row["provider"], row)
         return accounts
+
+    async def live_probe(
+        self,
+        *,
+        provider: str,
+        organization_id: str,
+        force_token_refresh: bool = False,
+    ) -> dict[str, object]:
+        """Run read-only provider probes while keeping credentials service-local."""
+        self._require_provider(provider)
+        account = self._connected_account(provider, organization_id)
+        refresh_token = decrypt_secret(account["refresh_token_cipher"])
+        refresh_performed = False
+        if force_token_refresh and refresh_token:
+            token = await self._refresh_access_token(
+                provider=provider,
+                connector_id=account["connector_id"],
+                organization_id=organization_id,
+                refresh_token=refresh_token,
+            )
+            refresh_performed = True
+        else:
+            token = await self._access_token(provider, organization_id)
+        account = self._connected_account(provider, organization_id)
+        probe = await probe_provider_access(
+            provider=provider,
+            access_token=token,
+            account_metadata=decode_json(account["metadata_json"], {}),
+            expected_external_account_id=account["external_account_id"],
+        )
+        return {
+            "configured": self._is_configured(provider),
+            "connector_id": account["connector_id"],
+            "account_label": account["account_label"],
+            "granted_scopes": decode_json(account["scopes_json"], []),
+            "required_scopes": list(PROVIDERS[provider]["scopes"]),
+            "has_refresh_token": bool(refresh_token),
+            "expires_at": self._string_or_none(account["expires_at"]),
+            "last_refresh_at": self._string_or_none(account["last_refresh_at"]),
+            "refresh_performed": refresh_performed,
+            "probe": probe,
+        }
+
+    def provider_is_configured(self, provider: str) -> bool:
+        self._require_provider(provider)
+        return self._is_configured(provider)
 
     def _is_configured(self, provider: str) -> bool:
         return bool(self._client_id(provider) and self._client_secret(provider))
@@ -1074,6 +1134,7 @@ class ConnectorService:
                 "workspace_id": token_payload.get("workspace_id") or "",
                 "workspace_name": token_payload.get("workspace_name") or "",
                 "workspace_icon": token_payload.get("workspace_icon") or "",
+                "bot_id": token_payload.get("bot_id") or "",
             }
         if provider == "jira":
             async with httpx.AsyncClient(timeout=20) as client:
@@ -1292,7 +1353,7 @@ class ConnectorService:
                     scopes_json = COALESCE(?, scopes_json), expires_at = ?,
                     refresh_expires_at = COALESCE(?, refresh_expires_at),
                     token_type = COALESCE(?, token_type), last_error = NULL,
-                    updated_at = ?
+                    last_refresh_at = ?, updated_at = ?
                 WHERE connector_id = ? AND organization_id = ?
                 """,
                 (
@@ -1302,6 +1363,7 @@ class ConnectorService:
                     self._expires_at(token_payload),
                     self._refresh_expires_at(token_payload),
                     token_payload.get("token_type"),
+                    now,
                     now,
                     connector_id,
                     organization_id,
@@ -1596,11 +1658,11 @@ class ConnectorService:
                 )
             elif provider == "notion":
                 response = await client.request(
-                    "DELETE",
+                    "POST",
                     "https://api.notion.com/v1/oauth/revoke",
                     auth=(self._client_id(provider) or "", self._client_secret(provider) or ""),
                     json={"token": access_token},
-                    headers={"Notion-Version": "2022-06-28"},
+                    headers={"Notion-Version": "2026-03-11"},
                 )
             else:
                 return False
@@ -1663,12 +1725,23 @@ class ConnectorService:
             created_at=self._string_or_none(row["created_at"]),
         )
 
-    @staticmethod
-    def _verify_webhook_signature(
-        *, provider: str, secret: str, raw_body: bytes, headers: dict[str, str]
+    async def _verify_webhook_signature(
+        self,
+        *,
+        provider: str,
+        resource: str,
+        secret: str,
+        raw_body: bytes,
+        headers: dict[str, str],
+        callback_url: str,
     ) -> bool:
         lowered = {key.lower(): value for key, value in headers.items()}
         if provider == "google":
+            if resource == "gmail":
+                return await self._verify_google_pubsub_token(
+                    headers=lowered,
+                    callback_url=callback_url,
+                )
             return hmac.compare_digest(lowered.get("x-goog-channel-token", ""), secret)
         if provider == "slack":
             timestamp = lowered.get("x-slack-request-timestamp", "")
@@ -1682,6 +1755,25 @@ class ConnectorService:
                 secret.encode(), signed, hashlib.sha256
             ).hexdigest()
             return hmac.compare_digest(lowered.get("x-slack-signature", ""), expected)
+        if provider == "jira":
+            authorization = lowered.get("authorization", "")
+            scheme, _, token = authorization.partition(" ")
+            client_id = self._client_id("jira")
+            client_secret = self._client_secret("jira")
+            if scheme.lower() != "bearer" or not token or not client_id or not client_secret:
+                return False
+            try:
+                claims = jwt.decode(
+                    token,
+                    client_secret,
+                    algorithms=["HS256"],
+                    options={"verify_aud": False},
+                )
+            except JWTError:
+                return False
+            audience = claims.get("aud")
+            audiences = audience if isinstance(audience, list) else [audience]
+            return not audience or client_id in audiences
         signature = (
             lowered.get("x-hub-signature-256")
             or lowered.get("x-notion-signature")
@@ -1695,6 +1787,59 @@ class ConnectorService:
         return hmac.compare_digest(
             lowered.get("x-workos-webhook-secret", ""), secret
         )
+
+    async def _verify_google_pubsub_token(
+        self, *, headers: dict[str, str], callback_url: str
+    ) -> bool:
+        authorization = headers.get("authorization", "")
+        scheme, _, token = authorization.partition(" ")
+        settings = get_settings()
+        service_account = str(settings.google_pubsub_service_account or "").strip()
+        audience = str(settings.google_pubsub_audience or callback_url).strip()
+        if scheme.lower() != "bearer" or not token or not service_account or not audience:
+            return False
+        try:
+            header = jwt.get_unverified_header(token)
+            async with httpx.AsyncClient(
+                timeout=settings.connector_request_timeout_seconds
+            ) as client:
+                response = await client.get(
+                    "https://www.googleapis.com/oauth2/v3/certs"
+                )
+            response.raise_for_status()
+            keys = response.json().get("keys") or []
+            key = next(
+                candidate
+                for candidate in keys
+                if candidate.get("kid") == header.get("kid")
+            )
+            claims = jwt.decode(
+                token,
+                key,
+                algorithms=["RS256"],
+                audience=audience,
+            )
+        except (JWTError, httpx.HTTPError, KeyError, StopIteration, TypeError, ValueError):
+            return False
+        issuer = claims.get("iss")
+        email = str(claims.get("email") or "")
+        verified = claims.get("email_verified")
+        return (
+            issuer in {"accounts.google.com", "https://accounts.google.com"}
+            and hmac.compare_digest(email, service_account)
+            and verified in {True, "true"}
+        )
+
+    @staticmethod
+    def _jira_webhook_matches_subscription(
+        *, payload: dict[str, object], remote_id: object
+    ) -> bool:
+        if not remote_id:
+            return False
+        matched = payload.get("matchedWebhookIds")
+        return isinstance(matched, list) and str(remote_id) in {
+            str(webhook_id) for webhook_id in matched
+        }
 
     @staticmethod
     def _external_delivery_id(

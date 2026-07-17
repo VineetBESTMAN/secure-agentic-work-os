@@ -187,6 +187,12 @@ class Settings(BaseSettings):
     google_client_secret: str | None = Field(
         default=None, validation_alias="GOOGLE_CLIENT_SECRET"
     )
+    google_pubsub_service_account: str | None = Field(
+        default=None, validation_alias="GOOGLE_PUBSUB_SERVICE_ACCOUNT"
+    )
+    google_pubsub_audience: str | None = Field(
+        default=None, validation_alias="GOOGLE_PUBSUB_AUDIENCE"
+    )
     github_client_id: str | None = Field(default=None, validation_alias="GITHUB_CLIENT_ID")
     github_client_secret: str | None = Field(
         default=None, validation_alias="GITHUB_CLIENT_SECRET"

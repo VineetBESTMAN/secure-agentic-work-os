@@ -505,7 +505,8 @@ h2 {
 
 .status-connected,
 .status-ready,
-.status-idle {
+.status-idle,
+.status-passed {
   background: #dcefe5;
   color: #276342;
 }
@@ -513,7 +514,8 @@ h2 {
 .status-pending_approval,
 .status-waiting_for_approval,
 .status-pending,
-.status-running {
+.status-running,
+.status-incomplete {
   background: #fff1ce;
   color: #795911;
 }
@@ -557,6 +559,41 @@ h2 {
 .connector-sync-list,
 .webhook-setup {
   margin-top: 10px;
+}
+
+.connector-validation {
+  border-top: 1px solid #d8e3d4;
+  padding-top: 9px;
+}
+
+.connector-validation summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.validation-checks {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.validation-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 7px;
+}
+
+.validation-check small {
+  grid-column: 1 / -1;
+}
+
+.status-not_applicable {
+  background: #e3e9ed;
+  color: #42515d;
 }
 
 .webhook-setup code {
