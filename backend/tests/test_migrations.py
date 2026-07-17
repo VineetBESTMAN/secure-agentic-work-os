@@ -45,7 +45,14 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     assert "connector_webhook_deliveries" in tables
     assert "connector_action_receipts" in tables
     assert "openclaw_clients" in tables
-    assert revision == ("20260716_0008",)
+    assert "connector_validation_runs" in tables
+    with sqlite3.connect(database_path) as connection:
+        connector_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(connector_accounts)").fetchall()
+        }
+    assert "last_refresh_at" in connector_columns
+    assert revision == ("20260717_0009",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -60,7 +67,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert revision == ("20260716_0008",)
+        assert revision == ("20260717_0009",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -167,7 +174,7 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         )
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260716_0008",)
+    assert revision == ("20260717_0009",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),

@@ -13,6 +13,8 @@ from app.models.schemas import (
     ConnectorSyncRequest,
     ConnectorSyncResponse,
     ConnectorSyncStateRecord,
+    ConnectorValidationRunRecord,
+    ConnectorValidationRunRequest,
     GoogleDriveFileListResponse,
     GoogleDriveImportRequest,
     OAuthStartResponse,
@@ -23,6 +25,7 @@ from app.models.schemas import (
 from app.services.audit import audit_service
 from app.services.background_tasks import BackgroundQueueError, background_task_service
 from app.services.connectors import connector_service
+from app.services.connector_validation import connector_validation_service
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
@@ -85,6 +88,63 @@ def list_connector_sync_states(
 ) -> list[ConnectorSyncStateRecord]:
     require_scope(user.scopes, "connectors:read")
     return connector_service.list_sync_states(user.organization_id)
+
+
+@router.get("/validation-runs", response_model=list[ConnectorValidationRunRecord])
+def list_connector_validation_runs(
+    provider: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    user=Depends(get_current_user),
+) -> list[ConnectorValidationRunRecord]:
+    require_scope(user.scopes, "connectors:read")
+    try:
+        return connector_validation_service.list_runs(
+            organization_id=user.organization_id,
+            provider=provider,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+
+
+@router.post(
+    "/{provider}/validation-runs",
+    response_model=ConnectorValidationRunRecord,
+    status_code=status.HTTP_201_CREATED,
+)
+async def run_connector_validation(
+    provider: str,
+    payload: ConnectorValidationRunRequest,
+    user=Depends(get_current_user),
+) -> ConnectorValidationRunRecord:
+    require_scope(user.scopes, "connectors:sync")
+    if payload.force_token_refresh:
+        require_scope(user.scopes, "connectors:manage")
+    try:
+        response = await connector_validation_service.run(
+            provider=provider,
+            requested_by=user.user_id,
+            organization_id=user.organization_id,
+            force_token_refresh=payload.force_token_refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    audit_service.record(
+        actor_id=user.user_id,
+        event_type="connectors.validation_run",
+        detail={
+            "provider": provider,
+            "validation_run_id": response.validation_run_id,
+            "status": response.status,
+            "force_token_refresh": payload.force_token_refresh,
+        },
+        organization_id=user.organization_id,
+    )
+    return response
 
 
 @router.post("/{provider}/sync", response_model=ConnectorSyncResponse)
@@ -204,7 +264,7 @@ async def receive_connector_webhook(
             detail="Webhook payload must be a JSON object.",
         )
     try:
-        return connector_service.receive_webhook(
+        return await connector_service.receive_webhook(
             provider=provider,
             subscription_id=subscription_id,
             raw_body=raw_body,

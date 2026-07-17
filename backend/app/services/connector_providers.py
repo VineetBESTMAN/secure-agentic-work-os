@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 import base64
 import json
+from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -18,6 +19,7 @@ GOOGLE_CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
 SLACK_API_BASE = "https://slack.com/api"
 GITHUB_API_BASE = "https://api.github.com"
 NOTION_API_BASE = "https://api.notion.com/v1"
+NOTION_API_VERSION = "2026-03-11"
 
 PROVIDER_CAPABILITIES: dict[str, dict[str, list[str]]] = {
     "google": {
@@ -66,6 +68,154 @@ def provider_resources(provider: str) -> list[str]:
 
 def provider_actions(provider: str) -> list[str]:
     return list(PROVIDER_CAPABILITIES.get(provider, {}).get("actions", []))
+
+
+async def probe_provider_access(
+    *,
+    provider: str,
+    access_token: str,
+    account_metadata: dict[str, object],
+    expected_external_account_id: str | None,
+) -> dict[str, object]:
+    """Run read-only provider checks and return only non-content evidence."""
+    timeout = get_settings().connector_request_timeout_seconds
+    headers = _bearer_headers(access_token)
+    checks: list[dict[str, object]] = []
+    identity_match: bool | None = None
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if provider == "google":
+            body = await _probe_endpoint(
+                client, checks, "identity", "Google OAuth identity", "GET",
+                "https://openidconnect.googleapis.com/v1/userinfo", headers=headers,
+            )
+            if body is not None:
+                identity_match = str(body.get("sub") or "") == str(expected_external_account_id or "")
+            await _probe_endpoint(
+                client, checks, "gmail_read", "Gmail read access", "GET",
+                f"{GOOGLE_GMAIL_BASE}/users/me/profile", headers=headers,
+            )
+            await _probe_endpoint(
+                client, checks, "calendar_read", "Google Calendar access", "GET",
+                f"{GOOGLE_CALENDAR_BASE}/calendars/primary", headers=headers,
+            )
+            await _probe_endpoint(
+                client, checks, "drive_read", "Google Drive read access", "GET",
+                "https://www.googleapis.com/drive/v3/files", headers=headers,
+                params={"pageSize": 1, "fields": "files(id)"},
+            )
+        elif provider == "slack":
+            body = await _probe_endpoint(
+                client, checks, "identity", "Slack workspace identity", "POST",
+                f"{SLACK_API_BASE}/auth.test", headers=headers, slack=True,
+            )
+            if body is not None:
+                identity_match = str(body.get("team_id") or "") == str(expected_external_account_id or "")
+            await _probe_endpoint(
+                client, checks, "messages_read", "Slack conversation access", "GET",
+                f"{SLACK_API_BASE}/conversations.list", headers=headers,
+                params={"limit": 1, "types": "public_channel,private_channel"}, slack=True,
+            )
+        elif provider == "github":
+            body = await _probe_endpoint(
+                client, checks, "identity", "GitHub OAuth identity", "GET",
+                f"{GITHUB_API_BASE}/user", headers=headers,
+            )
+            if body is not None:
+                identity_match = str(body.get("id") or "") == str(expected_external_account_id or "")
+            await _probe_endpoint(
+                client, checks, "issues_read", "GitHub issue access", "GET",
+                f"{GITHUB_API_BASE}/issues", headers=headers,
+                params={"per_page": 1, "filter": "all"},
+            )
+        elif provider == "jira":
+            body = await _probe_endpoint(
+                client, checks, "identity", "Jira cloud identity", "GET",
+                "https://api.atlassian.com/oauth/token/accessible-resources", headers=headers,
+            )
+            resources = body if isinstance(body, list) else []
+            identity_match = any(
+                str(resource.get("id") or "") == str(expected_external_account_id or "")
+                for resource in resources if isinstance(resource, dict)
+            ) if body is not None else None
+            cloud_id = str(account_metadata.get("cloud_id") or "")
+            await _probe_endpoint(
+                client, checks, "user_read", "Jira user access", "GET",
+                f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/myself", headers=headers,
+            )
+            await _probe_endpoint(
+                client, checks, "issues_read", "Jira issue access", "GET",
+                f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search/jql", headers=headers,
+                params={"maxResults": 1, "fields": "id"},
+            )
+        elif provider == "notion":
+            notion_headers = {**headers, "Notion-Version": NOTION_API_VERSION}
+            body = await _probe_endpoint(
+                client, checks, "identity", "Notion integration identity", "GET",
+                f"{NOTION_API_BASE}/users/me", headers=notion_headers,
+            )
+            bot_id = str(account_metadata.get("bot_id") or "")
+            live_bot_id = str(body.get("id") or "") if isinstance(body, dict) else ""
+            if live_bot_id and bot_id:
+                identity_match = live_bot_id == bot_id
+            elif live_bot_id and live_bot_id == str(expected_external_account_id or ""):
+                identity_match = True
+            await _probe_endpoint(
+                client, checks, "pages_read", "Notion page access", "POST",
+                f"{NOTION_API_BASE}/search", headers=notion_headers,
+                json_body={"page_size": 1, "filter": {"property": "object", "value": "page"}},
+            )
+        else:
+            raise ValueError("Unsupported connector provider.")
+
+    return {"identity_match": identity_match, "checks": checks}
+
+
+async def _probe_endpoint(
+    client: httpx.AsyncClient,
+    checks: list[dict[str, object]],
+    key: str,
+    label: str,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, object] | None = None,
+    json_body: dict[str, object] | None = None,
+    slack: bool = False,
+) -> Any | None:
+    started = perf_counter()
+    body: Any | None = None
+    status = "passed"
+    message = "Provider accepted the read-only probe."
+    http_status: int | None = None
+    try:
+        response = await client.request(
+            method, url, headers=headers, params=params, json=json_body
+        )
+        http_status = response.status_code
+        response.raise_for_status()
+        body = response.json()
+        if slack and (not isinstance(body, dict) or not body.get("ok")):
+            status = "failed"
+            message = "Slack rejected the read-only probe."
+            body = None
+    except httpx.HTTPStatusError as exc:
+        http_status = exc.response.status_code
+        status = "failed"
+        message = f"Provider returned HTTP {http_status} for this read-only probe."
+    except (httpx.HTTPError, ValueError, TypeError):
+        status = "failed"
+        message = "The read-only provider probe could not be completed."
+        body = None
+    latency_ms = round((perf_counter() - started) * 1000, 2)
+    evidence: dict[str, object] = {"latency_ms": latency_ms}
+    if http_status is not None:
+        evidence["http_status"] = http_status
+    checks.append(
+        {"key": key, "label": label, "status": status, "message": message, "evidence": evidence}
+    )
+    return body
 
 
 async def sync_provider_resource(
@@ -489,7 +639,7 @@ async def _sync_jira(
 async def _sync_notion(
     client: httpx.AsyncClient, headers: dict[str, str], cursor: str | None
 ) -> ProviderSyncBatch:
-    notion_headers = {**headers, "Notion-Version": "2022-06-28"}
+    notion_headers = {**headers, "Notion-Version": NOTION_API_VERSION}
     response = await client.post(
         f"{NOTION_API_BASE}/search",
         headers=notion_headers,
@@ -701,7 +851,7 @@ def _create_notion_page(
     headers: dict[str, str],
     arguments: dict[str, object],
 ) -> dict[str, object]:
-    notion_headers = {**headers, "Notion-Version": "2022-06-28"}
+    notion_headers = {**headers, "Notion-Version": NOTION_API_VERSION}
     parent_type = str(arguments.get("parent_type") or "page_id")
     if parent_type not in {"page_id", "database_id"}:
         raise ValueError("parent_type must be page_id or database_id.")
