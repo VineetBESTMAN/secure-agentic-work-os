@@ -12,6 +12,11 @@ x-app-environment: &app-environment
   APP_JOB_TIMEOUT_SECONDS: "600"
   APP_RUN_MIGRATIONS_ON_STARTUP: "true"
   APP_SECRET_KEY: change-me
+  APP_ENCRYPTION_KEYRING: '{"legacy":"change-me","primary":"docker-development-encryption-key-change-before-production"}'
+  APP_ACTIVE_ENCRYPTION_KEY_ID: primary
+  APP_RATE_LIMIT_BACKEND: redis
+  APP_MALWARE_SCANNER_MODE: basic
+  APP_MALWARE_FAIL_CLOSED: "false"
   APP_UPLOAD_DIR: /app/data/uploads
   APP_VECTOR_DIMENSIONS: "384"
   DATABASE_URL: postgresql://postgres:postgres@postgres:5432/agentic_work_os

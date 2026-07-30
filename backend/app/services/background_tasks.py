@@ -7,6 +7,7 @@ from rq import Queue, Retry
 from app.core.config import get_settings
 from app.models.schemas import ConnectorImportItem, JobRecord
 from app.services.jobs import job_service
+from app.services.security_controls import security_control_service
 from app.services.tasks import (
     ingest_connector_items_task,
     ingest_document_task,
@@ -29,6 +30,12 @@ class BackgroundTaskService:
         organization_id: str = "org_default",
     ) -> JobRecord:
         safe_filename = Path(filename).name or "uploaded-document.txt"
+        security_control_service.preflight_upload(
+            filename=safe_filename,
+            data=data,
+            actor_id=uploaded_by,
+            organization_id=organization_id,
+        )
         job = job_service.create(
             job_type="document.ingest",
             detail={

@@ -268,6 +268,62 @@ type PolicyRecord = {
   enabled: boolean;
 };
 
+type SecurityPolicy = {
+  policy_id: string;
+  organization_id: string;
+  dlp_mode: "disabled" | "audit" | "block";
+  dlp_data_types: ("api_key" | "credit_card" | "private_key" | "ssn")[];
+  malware_mode: "disabled" | "basic" | "clamav";
+  retention_enabled: boolean;
+  audit_retention_days: number;
+  runtime_retention_days: number;
+  connector_validation_retention_days: number;
+  rag_evaluation_retention_days: number;
+  security_finding_retention_days: number;
+  updated_by: string;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type SecurityFinding = {
+  finding_id: string;
+  control_type: "dlp" | "malware";
+  action: "audited" | "blocked";
+  resource_name: string;
+  content_hash: string;
+  findings: Record<string, unknown>[];
+  created_at: string | null;
+};
+
+type SecurityPosture = {
+  environment: string;
+  production_requirements_enforced: boolean;
+  secret_source: "environment" | "file" | "development-default";
+  encryption_active_key_id: string;
+  encryption_key_count: number;
+  rate_limit_enabled: boolean;
+  rate_limit_backend: "memory" | "redis";
+  malware_scanner_mode: "disabled" | "basic" | "clamav";
+  malware_fail_closed: boolean;
+  security_headers_enabled: boolean;
+  policy: SecurityPolicy;
+  recent_findings: SecurityFinding[];
+};
+
+type RetentionPreview = {
+  enabled: boolean;
+  cutoff_by_category: Record<string, string>;
+  eligible_by_category: Record<string, number>;
+  total_eligible: number;
+};
+
+type KeyRotationStatus = {
+  active_key_id: string;
+  available_key_ids: string[];
+  ciphertexts_by_key_id: Record<string, number>;
+  rotatable_ciphertexts: number;
+};
+
 type JobRecord = {
   job_id: string;
   job_type: string;
@@ -554,6 +610,10 @@ export default function App() {
   const [driveSearch, setDriveSearch] = useState("");
   const [selectedDriveFileIds, setSelectedDriveFileIds] = useState<string[]>([]);
   const [policies, setPolicies] = useState<PolicyRecord[]>([]);
+  const [securityPosture, setSecurityPosture] = useState<SecurityPosture | null>(null);
+  const [securityPolicy, setSecurityPolicy] = useState<SecurityPolicy | null>(null);
+  const [retentionPreview, setRetentionPreview] = useState<RetentionPreview | null>(null);
+  const [keyRotationStatus, setKeyRotationStatus] = useState<KeyRotationStatus | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [workflows, setWorkflows] = useState<AgentWorkflowRecord[]>([]);
   const [mcpTools, setMcpTools] = useState<MCPToolDefinition[]>([]);
@@ -617,6 +677,10 @@ export default function App() {
     setWebhookSubscriptions([]);
     setLatestWebhookSetup(null);
     setModelGateway(null);
+    setSecurityPosture(null);
+    setSecurityPolicy(null);
+    setRetentionPreview(null);
+    setKeyRotationStatus(null);
     localStorage.removeItem("workos_token");
     localStorage.removeItem("workos_refresh_token");
     localStorage.removeItem("workos_user");
@@ -713,6 +777,13 @@ export default function App() {
       setPolicies(await api<PolicyRecord[]>("/api/policies"));
       setJobs(await api<JobRecord[]>("/api/jobs"));
       setRuntimeSummary(await api<RuntimeSummary>("/api/observability/summary?hours=24"));
+      const [postureData, retentionData] = await Promise.all([
+        api<SecurityPosture>("/api/security/posture"),
+        api<RetentionPreview>("/api/security/retention/preview"),
+      ]);
+      setSecurityPosture(postureData);
+      setSecurityPolicy(postureData.policy);
+      setRetentionPreview(retentionData);
       setEvaluationDatasets(
         await api<RagEvaluationDataset[]>("/api/rag-evaluations/datasets"),
       );
@@ -731,6 +802,9 @@ export default function App() {
         setOidcProviders(
           await api<OIDCProvider[]>("/api/organizations/current/oidc-providers"),
         );
+        setKeyRotationStatus(
+          await api<KeyRotationStatus>("/api/security/key-rotation"),
+        );
       }
     } else {
       setMembers([]);
@@ -738,6 +812,10 @@ export default function App() {
       setOidcProviders([]);
       setOpenClawClients([]);
       setOpenClawStatus(null);
+      setSecurityPosture(null);
+      setSecurityPolicy(null);
+      setRetentionPreview(null);
+      setKeyRotationStatus(null);
     }
   }
 
@@ -1397,6 +1475,87 @@ export default function App() {
     }
   }
 
+  async function saveSecurityPolicy(event: FormEvent) {
+    event.preventDefault();
+    if (!securityPolicy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const updated = await api<SecurityPolicy>("/api/security/policy", {
+        method: "PUT",
+        body: JSON.stringify({
+          dlp_mode: securityPolicy.dlp_mode,
+          dlp_data_types: securityPolicy.dlp_data_types,
+          malware_mode: securityPolicy.malware_mode,
+          retention_enabled: securityPolicy.retention_enabled,
+          audit_retention_days: securityPolicy.audit_retention_days,
+          runtime_retention_days: securityPolicy.runtime_retention_days,
+          connector_validation_retention_days:
+            securityPolicy.connector_validation_retention_days,
+          rag_evaluation_retention_days:
+            securityPolicy.rag_evaluation_retention_days,
+          security_finding_retention_days:
+            securityPolicy.security_finding_retention_days,
+        }),
+      });
+      setSecurityPolicy(updated);
+      setRetentionPreview(
+        await api<RetentionPreview>("/api/security/retention/preview"),
+      );
+      setMessage("Organization security policy updated.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update security policy");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function executeRetention() {
+    if (
+      !window.confirm(
+        "Delete only records older than this tenant's configured retention cutoffs?",
+      )
+    ) return;
+    setBusy(true);
+    try {
+      const result = await api<{ total_deleted: number }>(
+        "/api/security/retention/execute",
+        { method: "POST", body: JSON.stringify({ confirm: true }) },
+      );
+      setRetentionPreview(
+        await api<RetentionPreview>("/api/security/retention/preview"),
+      );
+      setMessage(`Retention removed ${result.total_deleted} expired records.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Retention execution failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotateEncryptionKeys() {
+    if (
+      !window.confirm(
+        "Re-encrypt this tenant's stored connector and OIDC secrets with the active key?",
+      )
+    ) return;
+    setBusy(true);
+    try {
+      const result = await api<{ rotated_ciphertexts: number }>(
+        "/api/security/key-rotation",
+        { method: "POST", body: JSON.stringify({ confirm: true }) },
+      );
+      setKeyRotationStatus(
+        await api<KeyRotationStatus>("/api/security/key-rotation"),
+      );
+      setMessage(`Rotated ${result.rotated_ciphertexts} encrypted values.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Key rotation failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function toggleOpenClawScope(scope: OpenClawScope) {
     setOpenClawScopes((current) =>
       current.includes(scope)
@@ -1753,6 +1912,220 @@ export default function App() {
                   ))}
                 </div>
               </details>
+            )}
+          </section>
+        )}
+
+        {securityPosture && securityPolicy && (
+          <section className="panel security-hardening-console">
+            <div className="panel-title console-heading">
+              <div>
+                <ShieldCheck size={20} />
+                <div>
+                  <h2>Advanced Security Controls</h2>
+                  <small>
+                    Tenant DLP, malware scanning, rate limits, key rotation, and retention
+                  </small>
+                </div>
+              </div>
+              <span className="protocol-badge">{securityPosture.environment}</span>
+            </div>
+
+            <div className="security-summary">
+              <span>Secrets: {securityPosture.secret_source}</span>
+              <span>
+                Encryption: {securityPosture.encryption_active_key_id} (
+                {securityPosture.encryption_key_count} keys)
+              </span>
+              <span>
+                Rate limit: {securityPosture.rate_limit_enabled
+                  ? securityPosture.rate_limit_backend
+                  : "disabled"}
+              </span>
+              <span>
+                Headers: {securityPosture.security_headers_enabled ? "enabled" : "disabled"}
+              </span>
+              <span>
+                Malware fail-closed: {securityPosture.malware_fail_closed ? "yes" : "no"}
+              </span>
+            </div>
+
+            {user?.role === "admin" && (
+              <form className="stack" onSubmit={saveSecurityPolicy}>
+                <div className="split three">
+                  <label>
+                    DLP enforcement
+                    <select
+                      value={securityPolicy.dlp_mode}
+                      onChange={(event) =>
+                        setSecurityPolicy({
+                          ...securityPolicy,
+                          dlp_mode: event.target.value as SecurityPolicy["dlp_mode"],
+                        })
+                      }
+                    >
+                      <option value="disabled">Disabled</option>
+                      <option value="audit">Audit and quarantine</option>
+                      <option value="block">Block upload</option>
+                    </select>
+                  </label>
+                  <label>
+                    Malware scanner
+                    <select
+                      value={securityPolicy.malware_mode}
+                      onChange={(event) =>
+                        setSecurityPolicy({
+                          ...securityPolicy,
+                          malware_mode: event.target.value as SecurityPolicy["malware_mode"],
+                        })
+                      }
+                    >
+                      <option value="disabled">Disabled</option>
+                      <option value="basic">Built-in signatures</option>
+                      <option value="clamav">ClamAV INSTREAM</option>
+                    </select>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={securityPolicy.retention_enabled}
+                      onChange={(event) =>
+                        setSecurityPolicy({
+                          ...securityPolicy,
+                          retention_enabled: event.target.checked,
+                        })
+                      }
+                    />
+                    Enable retention enforcement
+                  </label>
+                </div>
+
+                <div className="security-summary">
+                  {(
+                    ["api_key", "private_key", "ssn", "credit_card"] as const
+                  ).map((dataType) => (
+                    <label key={dataType} className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={securityPolicy.dlp_data_types.includes(dataType)}
+                        onChange={(event) =>
+                          setSecurityPolicy({
+                            ...securityPolicy,
+                            dlp_data_types: event.target.checked
+                              ? [...securityPolicy.dlp_data_types, dataType]
+                              : securityPolicy.dlp_data_types.filter(
+                                  (item) => item !== dataType,
+                                ),
+                          })
+                        }
+                      />
+                      DLP: {dataType.replaceAll("_", " ")}
+                    </label>
+                  ))}
+                </div>
+
+                <div className="split three retention-inputs">
+                  {(
+                    [
+                      ["audit_retention_days", "Audit"],
+                      ["runtime_retention_days", "Runtime telemetry"],
+                      ["connector_validation_retention_days", "Connector validation"],
+                      ["rag_evaluation_retention_days", "RAG evaluations"],
+                      ["security_finding_retention_days", "Security findings"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label key={key}>
+                      {label} retention (days)
+                      <input
+                        type="number"
+                        min={7}
+                        max={3650}
+                        value={securityPolicy[key]}
+                        onChange={(event) =>
+                          setSecurityPolicy({
+                            ...securityPolicy,
+                            [key]: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div className="button-row">
+                  <button
+                    type="submit"
+                    disabled={busy || securityPolicy.dlp_data_types.length === 0}
+                  >
+                    <Save size={16} />
+                    Save security policy
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !securityPolicy.retention_enabled}
+                    onClick={() => void executeRetention()}
+                  >
+                    <Trash2 size={16} />
+                    Enforce retention
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !keyRotationStatus}
+                    onClick={() => void rotateEncryptionKeys()}
+                  >
+                    <RotateCcw size={16} />
+                    Rotate encrypted values
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="columns">
+              <div>
+                <h3>Retention preview</h3>
+                <div className="item-list compact">
+                  {Object.entries(retentionPreview?.eligible_by_category || {}).map(
+                    ([category, count]) => (
+                      <article key={category} className="item">
+                        <strong>{category.replaceAll("_", " ")}</strong>
+                        <span>{count} expired records eligible</span>
+                      </article>
+                    ),
+                  )}
+                  <small>
+                    Preview only. Deletion requires enabled policy, admin access, and explicit
+                    confirmation; each operation is tenant-scoped and audited.
+                  </small>
+                </div>
+              </div>
+              <div>
+                <h3>Recent security findings</h3>
+                <div className="item-list compact">
+                  {securityPosture.recent_findings.map((finding) => (
+                    <article key={finding.finding_id} className="item">
+                      <div className="execution-title">
+                        <strong>{finding.control_type.toUpperCase()}</strong>
+                        <span className={`status-pill status-${finding.action}`}>
+                          {finding.action}
+                        </span>
+                      </div>
+                      <span>{finding.resource_name}</span>
+                      <small>sha256:{finding.content_hash.slice(0, 16)}...</small>
+                    </article>
+                  ))}
+                  {securityPosture.recent_findings.length === 0 && (
+                    <p className="empty">No DLP or malware findings for this tenant.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {keyRotationStatus && (
+              <small>
+                Active key {keyRotationStatus.active_key_id};{" "}
+                {keyRotationStatus.rotatable_ciphertexts} encrypted values await rotation.
+                Key material is never returned to the browser.
+              </small>
             )}
           </section>
         )}

@@ -30,6 +30,7 @@ from app.services.grounded_answers import grounded_answer_service
 from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
+from app.services.security_controls import security_control_service
 
 STOP_WORDS = {
     "a",
@@ -172,6 +173,13 @@ class RagService:
         cleaned = _clean_text(text)
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
+        security_inspection = security_control_service.inspect_upload(
+            filename=filename,
+            data=data,
+            text=cleaned,
+            actor_id=uploaded_by,
+            organization_id=organization_id,
+        )
 
         chunks = _chunk_text(cleaned)
         if not chunks:
@@ -186,6 +194,9 @@ class RagService:
         (upload_dir / stored_name).write_bytes(data)
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        unsafe_reasons = list(
+            dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
+        )
         title = Path(filename).stem.replace("_", " ").replace("-", " ").strip() or filename
 
         with get_connection() as connection:
@@ -205,8 +216,8 @@ class RagService:
                     owner_team,
                     _summary(cleaned),
                     uploaded_by,
-                    scan.flagged,
-                    encode_json(scan.reasons),
+                    bool(unsafe_reasons),
+                    encode_json(unsafe_reasons),
                     organization_id,
                 ),
             )
@@ -263,6 +274,13 @@ class RagService:
         cleaned = _clean_text(_extract_text(filename=filename, data=data))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
+        security_inspection = security_control_service.inspect_upload(
+            filename=filename,
+            data=data,
+            text=cleaned,
+            actor_id=uploaded_by,
+            organization_id=organization_id,
+        )
         chunks = _chunk_text(cleaned)
         if not chunks:
             raise ValueError("No searchable chunks could be created from this file.")
@@ -274,6 +292,9 @@ class RagService:
         new_path.write_bytes(data)
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        unsafe_reasons = list(
+            dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
+        )
         title = (
             Path(safe_filename).stem.replace("_", " ").replace("-", " ").strip()
             or safe_filename
@@ -297,8 +318,8 @@ class RagService:
                     owner_team,
                     _summary(cleaned),
                     uploaded_by,
-                    scan.flagged,
-                    encode_json(scan.reasons),
+                    bool(unsafe_reasons),
+                    encode_json(unsafe_reasons),
                     document_id,
                     organization_id,
                 ),
@@ -451,15 +472,26 @@ class RagService:
         if not file_path.exists():
             raise ValueError("The original uploaded file is missing from local storage.")
 
-        cleaned = _clean_text(_extract_text(filename=document.filename, data=file_path.read_bytes()))
+        file_data = file_path.read_bytes()
+        cleaned = _clean_text(_extract_text(filename=document.filename, data=file_data))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
+        security_inspection = security_control_service.inspect_upload(
+            filename=document.filename,
+            data=file_data,
+            text=cleaned,
+            actor_id=document.document_id,
+            organization_id=organization_id,
+        )
 
         chunks = _chunk_text(cleaned)
         if not chunks:
             raise ValueError("No searchable chunks could be created from this file.")
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        unsafe_reasons = list(
+            dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
+        )
         with get_connection() as connection:
             connection.execute(
                 "DELETE FROM document_chunks WHERE document_id = ? AND organization_id = ?",
@@ -473,8 +505,8 @@ class RagService:
                 """,
                 (
                     _summary(cleaned),
-                    scan.flagged,
-                    encode_json(scan.reasons),
+                    bool(unsafe_reasons),
+                    encode_json(unsafe_reasons),
                     document_id,
                     organization_id,
                 ),

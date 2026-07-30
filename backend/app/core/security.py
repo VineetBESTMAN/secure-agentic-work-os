@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 from app.core.config import get_settings
 from app.models.schemas import UserContext
@@ -51,9 +52,9 @@ def decode_access_token(token: str) -> UserContext:
             token,
             settings.secret_key,
             algorithms=[settings.jwt_algorithm],
-            options={"require_sub": True, "require_exp": True},
+            options={"require": ["sub", "exp"]},
         )
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise _unauthorized("Invalid or expired token") from exc
 
     if payload.get("type") != "access":
@@ -92,9 +93,9 @@ def get_access_token_payload(token: str) -> dict[str, object]:
             token,
             settings.secret_key,
             algorithms=[settings.jwt_algorithm],
-            options={"require_sub": True, "require_exp": True},
+            options={"require": ["sub", "exp"]},
         )
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise _unauthorized("Invalid or expired token") from exc
 
 

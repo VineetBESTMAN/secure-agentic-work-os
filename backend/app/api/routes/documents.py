@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
+from app.core.config import get_settings
 from app.core.rbac import require_roles, require_scope
 from app.core.security import get_current_user
 from app.models.schemas import (
@@ -17,6 +18,7 @@ from app.services.prompt_guard import prompt_guard_service
 from app.services.rag import rag_service
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 
 def _validate_classification(classification: str) -> None:
@@ -25,6 +27,19 @@ def _validate_classification(classification: str) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="classification must be public, internal, or restricted",
         )
+
+
+async def _read_upload_limited(file: UploadFile) -> bytes:
+    maximum = get_settings().upload_max_bytes
+    data = bytearray()
+    while chunk := await file.read(UPLOAD_READ_CHUNK_BYTES):
+        data.extend(chunk)
+        if len(data) > maximum:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"Upload exceeds the {maximum}-byte security limit.",
+            )
+    return bytes(data)
 
 
 @router.post("/upload", response_model=DocumentRecord)
@@ -40,7 +55,7 @@ async def upload_document(
     try:
         document = rag_service.ingest_file(
             filename=file.filename or "uploaded-document.txt",
-            data=await file.read(),
+            data=await _read_upload_limited(file),
             classification=classification,
             owner_team=owner_team,
             uploaded_by=user.user_id,
@@ -82,7 +97,7 @@ async def queue_document_upload(
     try:
         job = background_task_service.enqueue_document(
             filename=file.filename or "uploaded-document.txt",
-            data=await file.read(),
+            data=await _read_upload_limited(file),
             classification=classification,
             owner_team=owner_team,
             uploaded_by=user.user_id,
