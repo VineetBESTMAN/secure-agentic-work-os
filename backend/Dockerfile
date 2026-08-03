@@ -10,7 +10,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY app ./app
 
-RUN python -m pip install --upgrade pip && \
+RUN python -m pip install --upgrade pip "setuptools>=83.0.0" && \
     python -m pip install . && \
     mkdir -p /app/data/uploads
 
