@@ -1,0 +1,295 @@
+x-production-environment: &production-environment
+  APP_ENV: production
+  APP_PUBLIC_BASE_URL: https://${APP_DOMAIN:?Set APP_DOMAIN}
+  APP_CORS_ORIGINS: https://${APP_DOMAIN:?Set APP_DOMAIN}
+  APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
+  APP_ENCRYPTION_KEYRING_FILE: /run/secrets/encryption_keyring
+  APP_ACTIVE_ENCRYPTION_KEY_ID: ${APP_ACTIVE_ENCRYPTION_KEY_ID:?Set APP_ACTIVE_ENCRYPTION_KEY_ID}
+  DATABASE_URL_FILE: /run/secrets/database_url
+  APP_DATABASE_TLS_REQUIRED: "true"
+  REDIS_URL_FILE: /run/secrets/redis_url
+  APP_REDIS_TLS_REQUIRED: "true"
+  APP_RUN_MIGRATIONS_ON_STARTUP: "false"
+  APP_ASYNC_JOBS_ENABLED: "true"
+  APP_ASYNC_JOBS_FALLBACK_SYNC: "false"
+  APP_JOB_QUEUE_NAME: ${APP_JOB_QUEUE_NAME:-ingestion}
+  APP_JOB_TIMEOUT_SECONDS: ${APP_JOB_TIMEOUT_SECONDS:-600}
+  APP_RATE_LIMIT_ENABLED: "true"
+  APP_RATE_LIMIT_BACKEND: redis
+  APP_MALWARE_SCANNER_MODE: clamav
+  APP_MALWARE_FAIL_CLOSED: "true"
+  CLAMAV_HOST: clamav
+  CLAMAV_PORT: "3310"
+  APP_UPLOAD_DIR: /app/data/uploads
+  APP_OBJECT_STORAGE_BACKEND: s3
+  APP_OBJECT_STORAGE_BUCKET: ${APP_OBJECT_STORAGE_BUCKET:?Set APP_OBJECT_STORAGE_BUCKET}
+  APP_OBJECT_STORAGE_PREFIX: ${APP_OBJECT_STORAGE_PREFIX:-workos}
+  APP_OBJECT_STORAGE_REGION: ${APP_OBJECT_STORAGE_REGION:-us-east-1}
+  APP_OBJECT_STORAGE_ENDPOINT_URL: ${APP_OBJECT_STORAGE_ENDPOINT_URL:-}
+  APP_OBJECT_STORAGE_FORCE_PATH_STYLE: ${APP_OBJECT_STORAGE_FORCE_PATH_STYLE:-false}
+  APP_OBJECT_STORAGE_SSE: ${APP_OBJECT_STORAGE_SSE:-AES256}
+  APP_OBJECT_STORAGE_KMS_KEY_ID: ${APP_OBJECT_STORAGE_KMS_KEY_ID:-}
+  APP_BACKUP_STATUS_PREFIX: ${APP_BACKUP_STATUS_PREFIX:-backups/postgres}
+  APP_BACKUP_RPO_SECONDS: ${APP_BACKUP_RPO_SECONDS:-90000}
+  APP_METRICS_ENABLED: "true"
+  APP_METRICS_TOKEN_FILE: /run/secrets/metrics_token
+  APP_OIDC_REDIRECT_BASE_URL: https://${APP_DOMAIN:?Set APP_DOMAIN}/api/auth/oidc
+  APP_OAUTH_REDIRECT_BASE_URL: https://${APP_DOMAIN:?Set APP_DOMAIN}/api/connectors
+  APP_CONNECTOR_WEBHOOK_BASE_URL: https://${APP_DOMAIN:?Set APP_DOMAIN}/api/connectors/webhooks
+  APP_MCP_ISSUER_URL: https://${APP_DOMAIN:?Set APP_DOMAIN}
+  APP_MCP_SERVER_URL: https://${APP_DOMAIN:?Set APP_DOMAIN}/protocol/mcp
+  APP_OPENCLAW_MCP_INTERNAL_URL: http://backend:8000/protocol/mcp
+  APP_EMBEDDING_PROVIDER: ${APP_EMBEDDING_PROVIDER:-local}
+  APP_MODEL_PROVIDER: ${APP_MODEL_PROVIDER:-deterministic}
+  APP_GROUNDED_ANSWERS_ENABLED: ${APP_GROUNDED_ANSWERS_ENABLED:-true}
+  APP_LLM_PLANNER_ENABLED: ${APP_LLM_PLANNER_ENABLED:-false}
+  APP_LLM_PLANNER_MAX_ACTIONS: ${APP_LLM_PLANNER_MAX_ACTIONS:-8}
+  APP_MODEL_MAX_INPUT_TOKENS: ${APP_MODEL_MAX_INPUT_TOKENS:-16000}
+  APP_VECTOR_DIMENSIONS: ${APP_VECTOR_DIMENSIONS:-384}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+  OPENAI_GENERATION_MODEL: ${OPENAI_GENERATION_MODEL:-gpt-5.6}
+
+x-app-secrets: &app-secrets
+  - app_secret_key
+  - encryption_keyring
+  - database_url
+  - redis_url
+  - metrics_token
+
+x-app-security: &app-security
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+
+services:
+  migrate:
+    image: ${BACKEND_IMAGE:-ghcr.io/vineetbestman/secure-agentic-work-os-backend}:${APP_IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: *production-environment
+    secrets: *app-secrets
+    <<: *app-security
+    restart: "no"
+
+  backend:
+    image: ${BACKEND_IMAGE:-ghcr.io/vineetbestman/secure-agentic-work-os-backend}:${APP_IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - caddy
+    environment: *production-environment
+    secrets: *app-secrets
+    volumes:
+      - staging_data:/app/data
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    <<: *app-security
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  worker:
+    image: ${BACKEND_IMAGE:-ghcr.io/vineetbestman/secure-agentic-work-os-backend}:${APP_IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment: *production-environment
+    secrets: *app-secrets
+    volumes:
+      - staging_data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_started
+    <<: *app-security
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/vineetbestman/secure-agentic-work-os-frontend}:${APP_IMAGE_TAG:-latest}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.production
+    expose:
+      - "8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /var/cache/nginx:size=16m,mode=0755
+      - /var/run:size=1m,mode=0755
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:1.4
+    expose:
+      - "3310"
+    volumes:
+      - clamav_signatures:/var/lib/clamav
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    secrets:
+      - metrics_token
+    volumes:
+      - ./ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      backend:
+        condition: service_healthy
+      alertmanager:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./ops/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  backup:
+    build:
+      context: ./ops/backup
+    environment:
+      DATABASE_URL_FILE: /run/secrets/database_url
+      APP_OBJECT_STORAGE_BUCKET: ${APP_OBJECT_STORAGE_BUCKET:?Set APP_OBJECT_STORAGE_BUCKET}
+      APP_OBJECT_STORAGE_PREFIX: ${APP_OBJECT_STORAGE_PREFIX:-workos}
+      APP_OBJECT_STORAGE_ENDPOINT_URL: ${APP_OBJECT_STORAGE_ENDPOINT_URL:-}
+      APP_OBJECT_STORAGE_SSE: ${APP_OBJECT_STORAGE_SSE:-AES256}
+      APP_OBJECT_STORAGE_KMS_KEY_ID: ${APP_OBJECT_STORAGE_KMS_KEY_ID:-}
+      APP_BACKUP_STATUS_PREFIX: ${APP_BACKUP_STATUS_PREFIX:-backups/postgres}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    secrets:
+      - database_url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    restart: unless-stopped
+
+  restore-verify:
+    profiles: ["restore"]
+    build:
+      context: ./ops/backup
+    entrypoint: ["/opt/workos/restore-verify.sh"]
+    environment:
+      RESTORE_VERIFY_ADMIN_URL_FILE: /run/secrets/restore_verify_admin_url
+      RESTORE_VERIFY_DATABASE_URL_FILE: /run/secrets/restore_verify_database_url
+      RESTORE_VERIFY_DATABASE_NAME: ${RESTORE_VERIFY_DATABASE_NAME:-workos_restore_verify}
+      APP_OBJECT_STORAGE_BUCKET: ${APP_OBJECT_STORAGE_BUCKET:?Set APP_OBJECT_STORAGE_BUCKET}
+      APP_OBJECT_STORAGE_PREFIX: ${APP_OBJECT_STORAGE_PREFIX:-workos}
+      APP_OBJECT_STORAGE_ENDPOINT_URL: ${APP_OBJECT_STORAGE_ENDPOINT_URL:-}
+      APP_BACKUP_STATUS_PREFIX: ${APP_BACKUP_STATUS_PREFIX:-backups/postgres}
+    secrets:
+      - restore_verify_admin_url
+      - restore_verify_database_url
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    restart: "no"
+
+secrets:
+  app_secret_key:
+    file: ${APP_SECRET_KEY_FILE_HOST:-.secrets/production/app-secret-key}
+  encryption_keyring:
+    file: ${APP_ENCRYPTION_KEYRING_FILE_HOST:-.secrets/production/encryption-keyring.json}
+  database_url:
+    file: ${DATABASE_URL_FILE_HOST:-.secrets/production/database-url}
+  redis_url:
+    file: ${REDIS_URL_FILE_HOST:-.secrets/production/redis-url}
+  metrics_token:
+    file: ${METRICS_TOKEN_FILE_HOST:-.secrets/production/metrics-token}
+  restore_verify_admin_url:
+    file: ${RESTORE_VERIFY_ADMIN_URL_FILE_HOST:-.secrets/production/restore-admin-url}
+  restore_verify_database_url:
+    file: ${RESTORE_VERIFY_DATABASE_URL_FILE_HOST:-.secrets/production/restore-database-url}
+
+volumes:
+  staging_data:
+  caddy_data:
+  caddy_config:
+  clamav_signatures:
+  prometheus_data:
+  alertmanager_data:

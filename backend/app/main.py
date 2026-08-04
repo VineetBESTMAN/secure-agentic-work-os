@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 import hashlib
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ from app.api.routes import (
     mcp,
     models,
     observability,
+    operations,
     openclaw,
     organizations,
     policies,
@@ -28,6 +30,7 @@ from app.core.config import get_settings
 from app.core.migrations import upgrade_database
 from app.services.approval import approval_service
 from app.services.mcp_protocol import security_mcp, security_mcp_http_app
+from app.services.metrics import metrics_service
 from app.services.observability import observability_service
 from app.services.policies import policy_service
 from app.services.rate_limit import rate_limit_service
@@ -59,7 +62,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=settings.cors_origin_list(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,9 +71,14 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_boundary(request: Request, call_next):
+    started_at = time.perf_counter()
     request_settings = get_settings()
     decision = None
-    if request_settings.rate_limit_enabled and request.url.path != "/health":
+    if request_settings.rate_limit_enabled and request.url.path not in {
+        "/health",
+        "/ready",
+        "/metrics",
+    }:
         if request.url.path.startswith(("/api/auth/login", "/api/auth/refresh")):
             limit = request_settings.rate_limit_auth_requests
             category = "auth"
@@ -121,6 +129,19 @@ async def security_boundary(request: Request, call_next):
             response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains"
             )
+    route = getattr(request.scope.get("route"), "path", None)
+    if not route:
+        route = (
+            request.url.path
+            if request.url.path in {"/health", "/ready", "/metrics"}
+            else "<unmatched>"
+        )
+    metrics_service.observe_request(
+        method=request.method,
+        route=route,
+        status_code=response.status_code,
+        duration_seconds=time.perf_counter() - started_at,
+    )
     return response
 
 app.include_router(health.router)
@@ -136,6 +157,7 @@ app.include_router(connectors.router, prefix="/api")
 app.include_router(policies.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
 app.include_router(observability.router, prefix="/api")
+app.include_router(operations.router, prefix="/api")
 app.include_router(rag_evaluations.router, prefix="/api")
 app.include_router(organizations.router, prefix="/api")
 app.include_router(security.router, prefix="/api")

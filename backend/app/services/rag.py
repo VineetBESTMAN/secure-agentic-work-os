@@ -28,6 +28,7 @@ from app.models.schemas import (
 from app.services.embeddings import embedding_service
 from app.services.grounded_answers import grounded_answer_service
 from app.services.observability import observability_service
+from app.services.object_storage import ObjectStorageError, object_storage_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
 from app.services.security_controls import security_control_service
@@ -99,6 +100,14 @@ def _chunk_text(text: str, chunk_size: int = 220, overlap: int = 40) -> list[str
     return chunks
 
 
+def _delete_storage_safely(key: str, *, backend: str) -> None:
+    """Best-effort cleanup must never mask a committed database operation."""
+    try:
+        object_storage_service.delete(key, backend=backend)
+    except ObjectStorageError:
+        pass
+
+
 def _extract_docx(data: bytes) -> str:
     with zipfile.ZipFile(BytesIO(data)) as archive:
         xml = archive.read("word/document.xml")
@@ -145,6 +154,8 @@ def _row_to_document(row) -> DocumentRecord:
         summary=row["summary"],
         unsafe=bool(row["unsafe"]),
         unsafe_reasons=decode_json(row["unsafe_reasons_json"], []),
+        storage_backend=row["storage_backend"],
+        storage_key=row["storage_key"],
         chunk_count=row["chunk_count"],
         created_at=str(created_at) if created_at is not None else None,
     )
@@ -185,51 +196,63 @@ class RagService:
         if not chunks:
             raise ValueError("No searchable chunks could be created from this file.")
 
-        settings = get_settings()
-        upload_dir = Path(settings.upload_dir)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-
         document_id = document_id or f"doc_{uuid4().hex}"
-        stored_name = f"{document_id}_{Path(filename).name}"
-        (upload_dir / stored_name).write_bytes(data)
+        safe_filename = Path(filename).name or "uploaded-document.txt"
+        storage_key = object_storage_service.document_key(
+            organization_id=organization_id,
+            document_id=document_id,
+            filename=safe_filename,
+        )
+        object_storage_service.put(storage_key, data, filename=safe_filename)
+        storage_backend = get_settings().object_storage_backend
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
         unsafe_reasons = list(
             dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
         )
-        title = Path(filename).stem.replace("_", " ").replace("-", " ").strip() or filename
+        title = (
+            Path(filename).stem.replace("_", " ").replace("-", " ").strip()
+            or filename
+        )
 
-        with get_connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO documents (
-                    document_id, title, filename, classification, owner_team, summary,
-                    uploaded_by, unsafe, unsafe_reasons_json, organization_id
+        try:
+            with get_connection() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO documents (
+                        document_id, title, filename, classification, owner_team, summary,
+                        uploaded_by, unsafe, unsafe_reasons_json, organization_id,
+                        storage_backend, storage_key
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document_id,
+                        title,
+                        safe_filename,
+                        classification,
+                        owner_team,
+                        _summary(cleaned),
+                        uploaded_by,
+                        bool(unsafe_reasons),
+                        encode_json(unsafe_reasons),
+                        organization_id,
+                        storage_backend,
+                        storage_key,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    document_id,
-                    title,
-                    filename,
-                    classification,
-                    owner_team,
-                    _summary(cleaned),
-                    uploaded_by,
-                    bool(unsafe_reasons),
-                    encode_json(unsafe_reasons),
-                    organization_id,
-                ),
-            )
-            with observability_service.context(
-                uploaded_by, organization_id=organization_id
-            ):
-                self._insert_chunks(
-                    connection,
-                    document_id=document_id,
-                    chunks=chunks,
-                    organization_id=organization_id,
-                )
+                with observability_service.context(
+                    uploaded_by, organization_id=organization_id
+                ):
+                    self._insert_chunks(
+                        connection,
+                        document_id=document_id,
+                        chunks=chunks,
+                        organization_id=organization_id,
+                    )
+        except Exception:
+            _delete_storage_safely(storage_key, backend=storage_backend)
+            raise
 
         return self.get_document(document_id=document_id, organization_id=organization_id)
 
@@ -286,10 +309,18 @@ class RagService:
             raise ValueError("No searchable chunks could be created from this file.")
 
         safe_filename = Path(filename).name or "connector-item.txt"
-        upload_dir = Path(get_settings().upload_dir)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        new_path = upload_dir / f"{document_id}_{safe_filename}"
-        new_path.write_bytes(data)
+        new_key = object_storage_service.document_key(
+            organization_id=organization_id,
+            document_id=document_id,
+            filename=safe_filename,
+        )
+        old_key = existing.storage_key or object_storage_service.legacy_document_key(
+            document_id=document_id, filename=existing.filename
+        )
+        if new_key == old_key:
+            new_key = f"{new_key}.{uuid4().hex}"
+        new_backend = get_settings().object_storage_backend
+        object_storage_service.put(new_key, data, filename=safe_filename)
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
         unsafe_reasons = list(
@@ -299,46 +330,49 @@ class RagService:
             Path(safe_filename).stem.replace("_", " ").replace("-", " ").strip()
             or safe_filename
         )
-        with get_connection() as connection:
-            connection.execute(
-                "DELETE FROM document_chunks WHERE document_id = ? AND organization_id = ?",
-                (document_id, organization_id),
-            )
-            connection.execute(
-                """
-                UPDATE documents
-                SET title = ?, filename = ?, classification = ?, owner_team = ?,
-                    summary = ?, uploaded_by = ?, unsafe = ?, unsafe_reasons_json = ?
-                WHERE document_id = ? AND organization_id = ?
-                """,
-                (
-                    title,
-                    safe_filename,
-                    classification,
-                    owner_team,
-                    _summary(cleaned),
-                    uploaded_by,
-                    bool(unsafe_reasons),
-                    encode_json(unsafe_reasons),
-                    document_id,
-                    organization_id,
-                ),
-            )
-            with observability_service.context(
-                uploaded_by, organization_id=organization_id
-            ):
-                self._insert_chunks(
-                    connection,
-                    document_id=document_id,
-                    chunks=chunks,
-                    organization_id=organization_id,
+        try:
+            with get_connection() as connection:
+                connection.execute(
+                    "DELETE FROM document_chunks WHERE document_id = ? AND organization_id = ?",
+                    (document_id, organization_id),
                 )
+                connection.execute(
+                    """
+                    UPDATE documents
+                    SET title = ?, filename = ?, classification = ?, owner_team = ?,
+                        summary = ?, uploaded_by = ?, unsafe = ?, unsafe_reasons_json = ?,
+                        storage_backend = ?, storage_key = ?
+                    WHERE document_id = ? AND organization_id = ?
+                    """,
+                    (
+                        title,
+                        safe_filename,
+                        classification,
+                        owner_team,
+                        _summary(cleaned),
+                        uploaded_by,
+                        bool(unsafe_reasons),
+                        encode_json(unsafe_reasons),
+                        new_backend,
+                        new_key,
+                        document_id,
+                        organization_id,
+                    ),
+                )
+                with observability_service.context(
+                    uploaded_by, organization_id=organization_id
+                ):
+                    self._insert_chunks(
+                        connection,
+                        document_id=document_id,
+                        chunks=chunks,
+                        organization_id=organization_id,
+                    )
+        except Exception:
+            _delete_storage_safely(new_key, backend=new_backend)
+            raise
 
-        old_path = self._stored_file_path(
-            document_id=document_id, filename=existing.filename
-        )
-        if old_path != new_path and old_path.exists():
-            old_path.unlink()
+        _delete_storage_safely(old_key, backend=existing.storage_backend)
         return self.get_document(
             document_id=document_id, organization_id=organization_id
         )
@@ -419,8 +453,12 @@ class RagService:
         role: str,
         organization_id: str = "org_default",
     ) -> DocumentRecord:
-        document = self.get_document(document_id=document_id, organization_id=organization_id)
-        if not self.can_access_document(document=document, role=role, organization_id=organization_id):
+        document = self.get_document(
+            document_id=document_id, organization_id=organization_id
+        )
+        if not self.can_access_document(
+            document=document, role=role, organization_id=organization_id
+        ):
             raise PermissionError("You do not have access to this document.")
 
         updates: list[str] = []
@@ -439,7 +477,8 @@ class RagService:
             params.extend((document_id, organization_id))
             with get_connection() as connection:
                 connection.execute(
-                    f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ? AND organization_id = ?",
+                    f"UPDATE documents SET {', '.join(updates)} "
+                    "WHERE document_id = ? AND organization_id = ?",
                     tuple(params),
                 )
         return self.get_document(document_id=document_id, organization_id=organization_id)
@@ -447,8 +486,12 @@ class RagService:
     def delete_document(
         self, document_id: str, role: str, organization_id: str = "org_default"
     ) -> None:
-        document = self.get_document(document_id=document_id, organization_id=organization_id)
-        if not self.can_access_document(document=document, role=role, organization_id=organization_id):
+        document = self.get_document(
+            document_id=document_id, organization_id=organization_id
+        )
+        if not self.can_access_document(
+            document=document, role=role, organization_id=organization_id
+        ):
             raise PermissionError("You do not have access to this document.")
 
         with get_connection() as connection:
@@ -457,22 +500,33 @@ class RagService:
                 (document_id, organization_id),
             )
 
-        file_path = self._stored_file_path(document_id=document_id, filename=document.filename)
-        if file_path.exists():
-            file_path.unlink()
+        storage_key = document.storage_key or object_storage_service.legacy_document_key(
+            document_id=document_id, filename=document.filename
+        )
+        _delete_storage_safely(storage_key, backend=document.storage_backend)
 
     def reindex_document(
         self, document_id: str, role: str, organization_id: str = "org_default"
     ) -> DocumentRecord:
-        document = self.get_document(document_id=document_id, organization_id=organization_id)
-        if not self.can_access_document(document=document, role=role, organization_id=organization_id):
+        document = self.get_document(
+            document_id=document_id, organization_id=organization_id
+        )
+        if not self.can_access_document(
+            document=document, role=role, organization_id=organization_id
+        ):
             raise PermissionError("You do not have access to this document.")
 
-        file_path = self._stored_file_path(document_id=document_id, filename=document.filename)
-        if not file_path.exists():
-            raise ValueError("The original uploaded file is missing from local storage.")
-
-        file_data = file_path.read_bytes()
+        storage_key = document.storage_key or object_storage_service.legacy_document_key(
+            document_id=document_id, filename=document.filename
+        )
+        try:
+            file_data = object_storage_service.get(
+                storage_key, backend=document.storage_backend
+            )
+        except ObjectStorageError as exc:
+            raise ValueError(
+                "The original uploaded file is missing from object storage."
+            ) from exc
         cleaned = _clean_text(_extract_text(filename=document.filename, data=file_data))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
@@ -736,9 +790,5 @@ class RagService:
             chunk_id=row["chunk_id"],
             score=round(score, 3),
         )
-
-    def _stored_file_path(self, document_id: str, filename: str) -> Path:
-        return Path(get_settings().upload_dir) / f"{document_id}_{Path(filename).name}"
-
 
 rag_service = RagService()

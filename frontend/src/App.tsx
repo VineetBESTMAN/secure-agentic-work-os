@@ -121,6 +121,8 @@ type DocumentRecord = {
   summary: string;
   unsafe: boolean;
   unsafe_reasons: string[];
+  storage_backend: "local" | "s3";
+  storage_key: string | null;
   chunk_count: number;
   created_at: string | null;
 };
@@ -322,6 +324,33 @@ type KeyRotationStatus = {
   available_key_ids: string[];
   ciphertexts_by_key_id: Record<string, number>;
   rotatable_ciphertexts: number;
+};
+
+type OperationsStatus = {
+  environment: string;
+  public_base_url: string;
+  production_mode: boolean;
+  database_backend: "sqlite" | "postgresql";
+  database_tls: boolean;
+  redis_tls: boolean;
+  object_storage_backend: "local" | "s3";
+  object_storage_bucket_configured: boolean;
+  metrics_enabled: boolean;
+  ready: boolean;
+  components: {
+    name: string;
+    status: "healthy" | "degraded" | "unavailable" | "not_configured";
+    detail: string;
+    checked_at: string;
+  }[];
+  backup: {
+    configured: boolean;
+    latest_backup_at: string | null;
+    age_seconds: number | null;
+    rpo_seconds: number;
+    stale: boolean;
+    detail: string;
+  };
 };
 
 type JobRecord = {
@@ -553,7 +582,9 @@ const DEFAULT_EVALUATION_CASES = JSON.stringify(
   2,
 );
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ??
+  (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
 let refreshPromise: Promise<string> | null = null;
 
 export default function App() {
@@ -614,6 +645,7 @@ export default function App() {
   const [securityPolicy, setSecurityPolicy] = useState<SecurityPolicy | null>(null);
   const [retentionPreview, setRetentionPreview] = useState<RetentionPreview | null>(null);
   const [keyRotationStatus, setKeyRotationStatus] = useState<KeyRotationStatus | null>(null);
+  const [operationsStatus, setOperationsStatus] = useState<OperationsStatus | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [workflows, setWorkflows] = useState<AgentWorkflowRecord[]>([]);
   const [mcpTools, setMcpTools] = useState<MCPToolDefinition[]>([]);
@@ -681,6 +713,7 @@ export default function App() {
     setSecurityPolicy(null);
     setRetentionPreview(null);
     setKeyRotationStatus(null);
+    setOperationsStatus(null);
     localStorage.removeItem("workos_token");
     localStorage.removeItem("workos_refresh_token");
     localStorage.removeItem("workos_user");
@@ -777,13 +810,15 @@ export default function App() {
       setPolicies(await api<PolicyRecord[]>("/api/policies"));
       setJobs(await api<JobRecord[]>("/api/jobs"));
       setRuntimeSummary(await api<RuntimeSummary>("/api/observability/summary?hours=24"));
-      const [postureData, retentionData] = await Promise.all([
+      const [postureData, retentionData, operationsData] = await Promise.all([
         api<SecurityPosture>("/api/security/posture"),
         api<RetentionPreview>("/api/security/retention/preview"),
+        api<OperationsStatus>("/api/operations/status"),
       ]);
       setSecurityPosture(postureData);
       setSecurityPolicy(postureData.policy);
       setRetentionPreview(retentionData);
+      setOperationsStatus(operationsData);
       setEvaluationDatasets(
         await api<RagEvaluationDataset[]>("/api/rag-evaluations/datasets"),
       );
@@ -816,6 +851,7 @@ export default function App() {
       setSecurityPolicy(null);
       setRetentionPreview(null);
       setKeyRotationStatus(null);
+      setOperationsStatus(null);
     }
   }
 
@@ -1913,6 +1949,86 @@ export default function App() {
                 </div>
               </details>
             )}
+          </section>
+        )}
+
+        {operationsStatus && (user?.role === "admin" || user?.role === "manager") && (
+          <section className="panel operations-console">
+            <div className="panel-title console-heading">
+              <div>
+                <Activity size={20} />
+                <div>
+                  <h2>Production Operations</h2>
+                  <small>Readiness, managed services, durable storage, and backup RPO</small>
+                </div>
+              </div>
+              <span
+                className={`status-pill status-${
+                  operationsStatus.ready ? "completed" : "failed"
+                }`}
+              >
+                {operationsStatus.ready ? "ready" : "not ready"}
+              </span>
+            </div>
+
+            <div className="security-summary">
+              <span>Environment: {operationsStatus.environment}</span>
+              <span>Database: {operationsStatus.database_backend}</span>
+              <span>
+                Database TLS: {operationsStatus.database_tls ? "enabled" : "not enabled"}
+              </span>
+              <span>
+                Redis TLS: {operationsStatus.redis_tls ? "enabled" : "not enabled"}
+              </span>
+              <span>Objects: {operationsStatus.object_storage_backend}</span>
+              <span>Metrics: {operationsStatus.metrics_enabled ? "enabled" : "disabled"}</span>
+            </div>
+
+            <div className="columns">
+              <div>
+                <h3>Runtime dependencies</h3>
+                <div className="item-list compact">
+                  {operationsStatus.components.map((component) => (
+                    <article key={component.name} className="item">
+                      <div className="execution-title">
+                        <strong>{component.name.replaceAll("_", " ")}</strong>
+                        <span
+                          className={`status-pill status-${
+                            component.status === "healthy" ? "completed" : "failed"
+                          }`}
+                        >
+                          {component.status.replaceAll("_", " ")}
+                        </span>
+                      </div>
+                      <small>{component.detail}</small>
+                    </article>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h3>Backup posture</h3>
+                <article className="item">
+                  <strong>
+                    {operationsStatus.backup.configured
+                      ? operationsStatus.backup.stale
+                        ? "RPO attention required"
+                        : "RPO healthy"
+                      : "Remote backups not configured"}
+                  </strong>
+                  <span>{operationsStatus.backup.detail}</span>
+                  {operationsStatus.backup.latest_backup_at && (
+                    <small>
+                      Latest object: {new Date(
+                        operationsStatus.backup.latest_backup_at,
+                      ).toLocaleString()}
+                    </small>
+                  )}
+                  <small>
+                    Target RPO: {Math.round(operationsStatus.backup.rpo_seconds / 3600)} hours
+                  </small>
+                </article>
+              </div>
+            </div>
           </section>
         )}
 

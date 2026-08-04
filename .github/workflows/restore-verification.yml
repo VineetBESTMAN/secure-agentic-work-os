@@ -1,0 +1,46 @@
+name: Verify production restore
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 3 * * 0"
+
+concurrency:
+  group: production-restore-verification
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  restore-verify:
+    if: ${{ vars.PRODUCTION_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+      DEPLOY_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+      DEPLOY_PATH: ${{ secrets.PRODUCTION_DEPLOY_PATH }}
+      SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+    steps:
+      - name: Configure verified SSH host
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 0600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0644 ~/.ssh/known_hosts
+      - name: Restore latest backup into an isolated verification database
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            bash -s -- "$DEPLOY_PATH" <<'REMOTE'
+          set -euo pipefail
+          deploy_path="$1"
+          case "$deploy_path" in
+            /*) ;;
+            *) echo "Production deploy path must be absolute." >&2; exit 2 ;;
+          esac
+          cd "$deploy_path"
+          docker compose --env-file .env.production -f docker-compose.production.yml --profile restore run --rm restore-verify
+          REMOTE

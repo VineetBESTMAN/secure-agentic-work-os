@@ -2,6 +2,7 @@ from functools import lru_cache
 import json
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qs, urlparse
 
 from pydantic import Field
 from pydantic import model_validator
@@ -13,6 +14,13 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     app_name: str = Field(default="Secure Agentic AI Work OS", validation_alias="APP_NAME")
     app_env: str = Field(default="development", validation_alias="APP_ENV")
+    public_base_url: str = Field(
+        default="http://127.0.0.1:5173", validation_alias="APP_PUBLIC_BASE_URL"
+    )
+    cors_origins: str = Field(
+        default="http://127.0.0.1:5173,http://localhost:5173",
+        validation_alias="APP_CORS_ORIGINS",
+    )
     secret_key: str = Field(default="change-me", validation_alias="APP_SECRET_KEY")
     secret_key_file: str | None = Field(
         default=None, validation_alias="APP_SECRET_KEY_FILE"
@@ -74,12 +82,64 @@ class Settings(BaseSettings):
         validation_alias="APP_DATABASE_PATH",
     )
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    database_url_file: str | None = Field(
+        default=None, validation_alias="DATABASE_URL_FILE"
+    )
+    database_tls_required: bool = Field(
+        default=False, validation_alias="APP_DATABASE_TLS_REQUIRED"
+    )
     run_migrations_on_startup: bool = Field(
         default=True, validation_alias="APP_RUN_MIGRATIONS_ON_STARTUP"
     )
     upload_dir: str = Field(
         default=str(BASE_DIR / "data" / "uploads"),
         validation_alias="APP_UPLOAD_DIR",
+    )
+    object_storage_backend: Literal["local", "s3"] = Field(
+        default="local", validation_alias="APP_OBJECT_STORAGE_BACKEND"
+    )
+    object_storage_bucket: str | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_BUCKET"
+    )
+    object_storage_prefix: str = Field(
+        default="workos", validation_alias="APP_OBJECT_STORAGE_PREFIX"
+    )
+    object_storage_region: str = Field(
+        default="us-east-1", validation_alias="APP_OBJECT_STORAGE_REGION"
+    )
+    object_storage_endpoint_url: str | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_ENDPOINT_URL"
+    )
+    object_storage_access_key_id: str | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_ACCESS_KEY_ID"
+    )
+    object_storage_access_key_id_file: str | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_ACCESS_KEY_ID_FILE"
+    )
+    object_storage_secret_access_key: str | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_SECRET_ACCESS_KEY"
+    )
+    object_storage_secret_access_key_file: str | None = Field(
+        default=None,
+        validation_alias="APP_OBJECT_STORAGE_SECRET_ACCESS_KEY_FILE",
+    )
+    object_storage_force_path_style: bool = Field(
+        default=False, validation_alias="APP_OBJECT_STORAGE_FORCE_PATH_STYLE"
+    )
+    object_storage_sse: Literal["AES256", "aws:kms"] | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_SSE"
+    )
+    object_storage_kms_key_id: str | None = Field(
+        default=None, validation_alias="APP_OBJECT_STORAGE_KMS_KEY_ID"
+    )
+    backup_status_prefix: str = Field(
+        default="backups/postgres", validation_alias="APP_BACKUP_STATUS_PREFIX"
+    )
+    backup_rpo_seconds: int = Field(
+        default=90_000,
+        ge=300,
+        le=31_536_000,
+        validation_alias="APP_BACKUP_RPO_SECONDS",
     )
     upload_max_bytes: int = Field(
         default=25 * 1024 * 1024,
@@ -146,11 +206,22 @@ class Settings(BaseSettings):
     redis_url: str = Field(
         default="redis://127.0.0.1:6379/0", validation_alias="REDIS_URL"
     )
+    redis_url_file: str | None = Field(default=None, validation_alias="REDIS_URL_FILE")
+    redis_tls_required: bool = Field(
+        default=False, validation_alias="APP_REDIS_TLS_REQUIRED"
+    )
     job_queue_name: str = Field(
         default="ingestion", validation_alias="APP_JOB_QUEUE_NAME"
     )
     job_timeout_seconds: int = Field(
         default=600, validation_alias="APP_JOB_TIMEOUT_SECONDS"
+    )
+    metrics_enabled: bool = Field(
+        default=True, validation_alias="APP_METRICS_ENABLED"
+    )
+    metrics_token: str | None = Field(default=None, validation_alias="APP_METRICS_TOKEN")
+    metrics_token_file: str | None = Field(
+        default=None, validation_alias="APP_METRICS_TOKEN_FILE"
     )
     vector_dimensions: int = Field(default=384, validation_alias="APP_VECTOR_DIMENSIONS")
     embedding_provider: str = Field(default="local", validation_alias="APP_EMBEDDING_PROVIDER")
@@ -288,6 +359,27 @@ class Settings(BaseSettings):
             self.encryption_keyring = _read_secret_file(
                 self.encryption_keyring_file, "encryption keyring"
             )
+        if self.database_url_file:
+            self.database_url = _read_secret_file(
+                self.database_url_file, "database connection URL"
+            )
+        if self.redis_url_file:
+            self.redis_url = _read_secret_file(
+                self.redis_url_file, "Redis connection URL"
+            )
+        if self.object_storage_access_key_id_file:
+            self.object_storage_access_key_id = _read_secret_file(
+                self.object_storage_access_key_id_file, "object storage access key ID"
+            )
+        if self.object_storage_secret_access_key_file:
+            self.object_storage_secret_access_key = _read_secret_file(
+                self.object_storage_secret_access_key_file,
+                "object storage secret access key",
+            )
+        if self.metrics_token_file:
+            self.metrics_token = _read_secret_file(
+                self.metrics_token_file, "metrics bearer token"
+            )
         parsed_keyring: dict[str, object] | None = None
         if self.encryption_keyring:
             try:
@@ -301,6 +393,18 @@ class Settings(BaseSettings):
                     "APP_ACTIVE_ENCRYPTION_KEY_ID is absent from the encryption keyring."
                 )
             parsed_keyring = candidate
+
+        if self.database_tls_required and (
+            not self.database_url or not _postgres_tls_enabled(self.database_url)
+        ):
+            raise ValueError(
+                "APP_DATABASE_TLS_REQUIRED=true requires sslmode=require, "
+                "verify-ca, or verify-full in DATABASE_URL."
+            )
+        if self.redis_tls_required and not self.redis_url.startswith("rediss://"):
+            raise ValueError(
+                "APP_REDIS_TLS_REQUIRED=true requires a rediss:// REDIS_URL."
+            )
 
         if self.app_env.lower() == "production":
             if self.secret_key == "change-me" or len(self.secret_key) < 32:
@@ -326,7 +430,69 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Production requires malware scanning with APP_MALWARE_FAIL_CLOSED=true."
                 )
+            if not self.public_base_url.startswith("https://"):
+                raise ValueError("Production requires an HTTPS APP_PUBLIC_BASE_URL.")
+            public_urls = {
+                "APP_OIDC_REDIRECT_BASE_URL": self.oidc_redirect_base_url,
+                "APP_OAUTH_REDIRECT_BASE_URL": self.oauth_redirect_base_url,
+                "APP_CONNECTOR_WEBHOOK_BASE_URL": self.connector_webhook_base_url,
+                "APP_MCP_ISSUER_URL": self.mcp_issuer_url,
+                "APP_MCP_SERVER_URL": self.mcp_server_url,
+            }
+            insecure_urls = [
+                name for name, value in public_urls.items() if not value.startswith("https://")
+            ]
+            if insecure_urls:
+                raise ValueError(
+                    "Production public callback and protocol URLs must use HTTPS: "
+                    + ", ".join(insecure_urls)
+                )
+            if any(not origin.startswith("https://") for origin in self.cors_origin_list()):
+                raise ValueError("Production CORS origins must use HTTPS.")
+            if not self.database_url or not self.database_url.startswith(
+                ("postgresql://", "postgres://")
+            ):
+                raise ValueError("Production requires a managed PostgreSQL DATABASE_URL.")
+            if not _postgres_tls_enabled(self.database_url):
+                raise ValueError(
+                    "Production PostgreSQL requires sslmode=require, verify-ca, "
+                    "or verify-full in DATABASE_URL."
+                )
+            if not self.redis_url.startswith("rediss://"):
+                raise ValueError("Production Redis requires a rediss:// REDIS_URL.")
+            if self.object_storage_backend != "s3" or not self.object_storage_bucket:
+                raise ValueError(
+                    "Production requires S3-compatible object storage and a bucket."
+                )
+            if not self.object_storage_sse:
+                raise ValueError("Production object storage requires server-side encryption.")
+            if self.object_storage_sse == "aws:kms" and not self.object_storage_kms_key_id:
+                raise ValueError(
+                    "APP_OBJECT_STORAGE_KMS_KEY_ID is required when using aws:kms."
+                )
+            if (
+                self.object_storage_endpoint_url
+                and not self.object_storage_endpoint_url.startswith("https://")
+            ):
+                raise ValueError(
+                    "Production object storage endpoints must use HTTPS."
+                )
+            if (
+                not self.metrics_enabled
+                or not self.metrics_token
+                or len(self.metrics_token) < 24
+            ):
+                raise ValueError(
+                    "Production requires metrics with a bearer token of at least 24 characters."
+                )
         return self
+
+    def cors_origin_list(self) -> list[str]:
+        origins = [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+        return list(dict.fromkeys(origins))
+
+    def database_tls_enabled(self) -> bool:
+        return bool(self.database_url and _postgres_tls_enabled(self.database_url))
 
 
 @lru_cache
@@ -343,3 +509,8 @@ def _read_secret_file(path_value: str, label: str) -> str:
     if not value:
         raise ValueError(f"The {label} file is empty: {path}")
     return value
+
+
+def _postgres_tls_enabled(database_url: str) -> bool:
+    values = parse_qs(urlparse(database_url).query).get("sslmode", [])
+    return bool(values and values[-1] in {"require", "verify-ca", "verify-full"})

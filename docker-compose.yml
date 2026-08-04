@@ -57,7 +57,7 @@ services:
   worker:
     build:
       context: ./backend
-    command: ["rq", "worker", "--url", "redis://redis:6379/0", "ingestion"]
+    command: ["python", "-m", "app.worker"]
     environment: *app-environment
     volumes:
       - backend_data:/app/data

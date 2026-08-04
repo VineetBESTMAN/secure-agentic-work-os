@@ -138,6 +138,8 @@ class DocumentRecord(BaseModel):
     summary: str
     unsafe: bool = False
     unsafe_reasons: list[str] = Field(default_factory=list)
+    storage_backend: Literal["local", "s3"] = "local"
+    storage_key: str | None = None
     chunk_count: int = 0
     created_at: str | None = None
 
@@ -914,3 +916,34 @@ class RuntimeSummary(BaseModel):
     estimated_cost_usd: float
     breakdown: list[ObservationBreakdown] = Field(default_factory=list)
     budgets: list[CostBudgetRecord] = Field(default_factory=list)
+
+
+class OperationalComponent(BaseModel):
+    name: str
+    status: Literal["healthy", "degraded", "unavailable", "not_configured"]
+    detail: str
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BackupStatus(BaseModel):
+    configured: bool
+    latest_backup_at: datetime | None = None
+    age_seconds: int | None = None
+    rpo_seconds: int
+    stale: bool = False
+    detail: str
+
+
+class OperationsStatus(BaseModel):
+    environment: str
+    public_base_url: str
+    production_mode: bool
+    database_backend: Literal["sqlite", "postgresql"]
+    database_tls: bool
+    redis_tls: bool
+    object_storage_backend: Literal["local", "s3"]
+    object_storage_bucket_configured: bool
+    metrics_enabled: bool
+    ready: bool
+    components: list[OperationalComponent] = Field(default_factory=list)
+    backup: BackupStatus

@@ -54,3 +54,24 @@ jobs:
       - name: Audit frontend
         working-directory: frontend
         run: npm audit --audit-level=moderate
+
+  production-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate production Compose, proxy, metrics, and alerts
+        run: bash scripts/verify_production_config.sh
+      - name: Build production application images
+        env:
+          APP_DOMAIN: workos.example.com
+          ACME_EMAIL: operations@example.com
+          APP_ACTIVE_ENCRYPTION_KEY_ID: primary
+          APP_OBJECT_STORAGE_BUCKET: workos-production
+        run: |
+          docker build -t workos-backend-ci backend
+          docker build -f frontend/Dockerfile.production -t workos-frontend-ci frontend
+          docker run --rm --entrypoint sh workos-frontend-ci -c "nginx -t && ! grep -R 'http://127.0.0.1:8000' /usr/share/nginx/html"
+          docker build -t workos-backup-ci ops/backup
+          docker run --rm --entrypoint bash workos-backup-ci -n /opt/workos/backup.sh
+          docker run --rm --entrypoint bash workos-backup-ci -n /opt/workos/restore-verify.sh
+          docker run --rm --entrypoint bash workos-backup-ci -n /opt/workos/entrypoint.sh

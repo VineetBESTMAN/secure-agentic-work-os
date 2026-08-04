@@ -1,0 +1,37 @@
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	}
+
+	@backend path /api/* /protocol/* /health /ready
+	handle @backend {
+		reverse_proxy backend:8000 {
+			health_uri /ready
+			health_interval 15s
+			health_timeout 5s
+			lb_try_duration 5s
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:8080
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

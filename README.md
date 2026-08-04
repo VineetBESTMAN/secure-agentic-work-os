@@ -36,7 +36,8 @@ The application runs locally with Docker Compose and supports testing with real 
 - Persistent RAG evaluation datasets with local-versus-OpenAI quality comparisons
 - Daily or monthly cost budgets with warning thresholds and preflight enforcement for priced providers
 - Alembic migrations and automated Docker verification
-- GitHub Actions checks for backend tests, migration round trips, frontend builds, and dependency audits
+- Production HTTPS proxying, managed-service configuration, encrypted object storage, backups, restore verification, metrics, and alerts
+- GitHub Actions checks for tests, migrations, builds, dependency audits, production configuration, image publishing, deployment, and restore verification
 
 ## Architecture
 
@@ -64,6 +65,8 @@ The application runs locally with Docker Compose and supports testing with real 
 - Redis carries background ingestion jobs to the RQ worker
 - Named Docker volumes persist database data and uploaded files
 - SQLite and inline jobs provide a low-dependency local development mode
+- Production mode requires TLS-enabled managed PostgreSQL and Redis plus encrypted S3-compatible object storage
+- Caddy terminates HTTPS, while Prometheus and Alertmanager remain on the internal Compose network
 
 ## Repository layout
 
@@ -437,6 +440,60 @@ A provider remains `incomplete` until its real developer application and account
 
 The validator never sends messages or creates provider records itself. It recognizes external actions only from completed connector receipts joined to an MCP execution with a recorded approval.
 
+## Production deployment and operations
+
+`docker-compose.production.yml` runs the application behind Caddy with automatic HTTPS, immutable read-only application containers, fail-closed ClamAV scanning, protected Prometheus metrics, Alertmanager rules, scheduled PostgreSQL backups, and an isolated restore-verification job. PostgreSQL, Redis, and S3-compatible object storage are external managed services; the production stack does not publish their ports or create disposable replacements.
+
+Provision these dependencies before deployment:
+
+- a DNS record for the application domain pointing to the deployment host, with inbound TCP 80/443 and UDP 443 permitted
+- PostgreSQL with TLS and a connection URL containing `sslmode=require`, `verify-ca`, or `verify-full`
+- Redis with TLS and a `rediss://` connection URL
+- a private S3-compatible bucket with versioning, lifecycle policy, server-side encryption, and a least-privilege workload identity
+- separate PostgreSQL administration and scratch-database URLs for restore verification
+
+Copy `.env.production.example` to the ignored `.env.production`, create each file under `.secrets/production/`, and keep those files outside version control. Use a JSON encryption keyring whose active key matches `APP_ACTIVE_ENCRYPTION_KEY_ID`. The production Compose file expects a host or workload identity for S3; if static credentials are unavoidable, mount the supported object-storage credential files through a private Compose override.
+
+Validate the production artifacts without starting the application:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify_production_config.ps1
+```
+
+After provisioning the managed services and secrets, deploy with:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --wait
+docker compose --env-file .env.production -f docker-compose.production.yml ps
+```
+
+The public liveness and dependency-readiness endpoints are `/health` and `/ready`. `/metrics` is reachable only on the internal backend network and requires the bearer token mounted into Prometheus. Admins and managers can inspect the same sanitized dependency and backup state in the **Production Operations** panel.
+
+### Object storage migration
+
+The document migration adds storage metadata and preserves every existing upload. When moving an installation from local files to S3, first configure the destination and run the migration helper in dry-run mode from `backend/`:
+
+```bash
+python ../scripts/migrate_object_storage.py
+python ../scripts/migrate_object_storage.py --execute
+```
+
+Each object is uploaded, read back, and SHA-256 verified before its database record changes. Local source files are deliberately retained, so rollback does not depend on deleting or reconstructing existing data.
+
+### Backups, restoration, monitoring, and deployment automation
+
+The backup service creates compressed `pg_dump` archives, SHA-256 checksums, and manifests, uploads them with server-side encryption, and verifies the stored object. Set `BACKUP_INTERVAL_SECONDS` and `APP_BACKUP_RPO_SECONDS` to the required operating objectives. Test the newest backup only against the dedicated scratch database:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.production.yml --profile restore run --rm restore-verify
+```
+
+The verifier checks the checksum, restores with error-on-failure semantics, confirms the target database identity, reads the Alembic revision and document count, then removes only the explicitly named scratch database. Never point either restore-verification secret at the live application database.
+
+Prometheus alert rules cover backend availability, readiness, HTTP 5xx rate, p95 latency, and missing or stale backups. The checked-in Alertmanager receiver intentionally has no external destination; add an operator-owned override with the desired paging or messaging credentials before production launch.
+
+The deployment workflow publishes commit-addressed backend and frontend images with provenance and SBOM metadata. To enable its environment-gated SSH deployment and weekly restore test, configure the GitHub `production` environment with `PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_USER`, `PRODUCTION_DEPLOY_PATH`, `PRODUCTION_SSH_PRIVATE_KEY`, and `PRODUCTION_SSH_KNOWN_HOSTS`; set `PRODUCTION_DEPLOY_ENABLED=true` and `PRODUCTION_APP_URL` as repository environment variables. The target directory must contain this repository, `.env.production`, and its secret files.
+
 ## Local development
 
 Docker is the primary full-stack path. The backend and frontend can also run directly for development.
@@ -498,8 +555,8 @@ bash scripts/verify_docker_stack.sh
 
 The verification scripts build the stack, check the Alembic revision, sign in, import a queued sample, query PostgreSQL/pgvector, verify that a rejected provider action never executes, complete a provider-free workflow, and confirm the frontend is reachable.
 
-GitHub Actions run backend tests, an Alembic upgrade/downgrade round trip, the frontend production build, and `npm audit --audit-level=moderate` on pushes to `main` and on pull requests.
+GitHub Actions run backend tests, an Alembic upgrade/downgrade round trip, frontend and production-image builds, dependency audits, and production Compose/proxy/monitoring validation on pushes to `main` and on pull requests.
 
 ## Public repository safety
 
-This repository is configured for local demonstration, not direct internet exposure. The Docker defaults include known demo credentials, a development database password, `APP_SECRET_KEY=change-me`, and a development encryption keyring. Keep `.env`, `.secrets`, and provider credentials untracked. Production mode deliberately refuses these defaults and requires external secret files or injected secret values before startup.
+The default `docker-compose.yml` is configured for local demonstration, not direct internet exposure. It includes known demo credentials, a development database password, `APP_SECRET_KEY=change-me`, and a development encryption keyring. Keep `.env`, `.env.production`, `.secrets`, and provider credentials untracked. The separate production configuration deliberately refuses these defaults and requires HTTPS, managed TLS services, encrypted object storage, protected metrics, and external secret files before startup.
