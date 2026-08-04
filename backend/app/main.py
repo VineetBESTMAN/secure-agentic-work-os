@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import hashlib
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes import (
     agent,
@@ -19,6 +22,7 @@ from app.api.routes import (
     organizations,
     policies,
     rag_evaluations,
+    security,
 )
 from app.core.config import get_settings
 from app.core.migrations import upgrade_database
@@ -26,6 +30,7 @@ from app.services.approval import approval_service
 from app.services.mcp_protocol import security_mcp, security_mcp_http_app
 from app.services.observability import observability_service
 from app.services.policies import policy_service
+from app.services.rate_limit import rate_limit_service
 from app.services.users import user_service
 from app.services.workflows import workflow_service
 
@@ -60,6 +65,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def security_boundary(request: Request, call_next):
+    request_settings = get_settings()
+    decision = None
+    if request_settings.rate_limit_enabled and request.url.path != "/health":
+        if request.url.path.startswith(("/api/auth/login", "/api/auth/refresh")):
+            limit = request_settings.rate_limit_auth_requests
+            category = "auth"
+        elif request.url.path.startswith("/api/documents/upload"):
+            limit = request_settings.rate_limit_upload_requests
+            category = "upload"
+        else:
+            limit = request_settings.rate_limit_requests
+            category = "default"
+        authorization = request.headers.get("authorization", "")
+        if authorization:
+            principal = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
+        else:
+            principal = request.client.host if request.client else "unknown"
+        decision = rate_limit_service.consume(
+            f"{category}:{principal}",
+            limit=limit,
+            window_seconds=request_settings.rate_limit_window_seconds,
+        )
+        if not decision.allowed:
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": "Request rate limit exceeded. Retry later."},
+                headers={"Retry-After": str(decision.reset_after_seconds)},
+            )
+        else:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
+
+    if decision:
+        response.headers["X-RateLimit-Limit"] = str(decision.limit)
+        response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+        response.headers["X-RateLimit-Reset"] = str(decision.reset_after_seconds)
+    if request_settings.security_headers_enabled:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(), payment=()"
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        if request_settings.app_env.lower() == "production":
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+    return response
+
 app.include_router(health.router)
 app.include_router(auth.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
@@ -75,4 +138,5 @@ app.include_router(jobs.router, prefix="/api")
 app.include_router(observability.router, prefix="/api")
 app.include_router(rag_evaluations.router, prefix="/api")
 app.include_router(organizations.router, prefix="/api")
+app.include_router(security.router, prefix="/api")
 app.mount("/protocol", security_mcp_http_app)

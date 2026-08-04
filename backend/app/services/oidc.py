@@ -8,7 +8,8 @@ from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
 import httpx
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 from app.core.config import get_settings
 from app.core.crypto import decrypt_secret, encrypt_secret
@@ -188,15 +189,16 @@ class OIDCService:
         if key is None:
             raise ValueError("OIDC signing key was not found.")
         try:
+            verification_key = jwt.PyJWK.from_dict(key).key
             claims = jwt.decode(
                 id_token,
-                key,
+                verification_key,
                 algorithms=[algorithm],
                 audience=provider["client_id"],
                 issuer=provider["issuer_url"],
-                options={"require_exp": True, "require_iat": True},
+                options={"require": ["exp", "iat"]},
             )
-        except JWTError as exc:
+        except InvalidTokenError as exc:
             raise ValueError("OIDC ID token validation failed.") from exc
         if not secrets.compare_digest(str(claims.get("nonce", "")), saved_state["nonce"]):
             raise ValueError("OIDC nonce validation failed.")

@@ -377,6 +377,98 @@ class AuditEvent(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SecurityPolicyUpdateRequest(BaseModel):
+    dlp_mode: Literal["disabled", "audit", "block"] = "audit"
+    dlp_data_types: list[
+        Literal["api_key", "credit_card", "private_key", "ssn"]
+    ] = Field(
+        default_factory=lambda: ["api_key", "credit_card", "private_key", "ssn"],
+        min_length=1,
+        max_length=4,
+    )
+    malware_mode: Literal["disabled", "basic", "clamav"] = "basic"
+    retention_enabled: bool = False
+    audit_retention_days: int = Field(default=365, ge=7, le=3_650)
+    runtime_retention_days: int = Field(default=90, ge=7, le=3_650)
+    connector_validation_retention_days: int = Field(default=90, ge=7, le=3_650)
+    rag_evaluation_retention_days: int = Field(default=180, ge=7, le=3_650)
+    security_finding_retention_days: int = Field(default=365, ge=7, le=3_650)
+
+    @model_validator(mode="after")
+    def validate_unique_dlp_types(self) -> "SecurityPolicyUpdateRequest":
+        if len(set(self.dlp_data_types)) != len(self.dlp_data_types):
+            raise ValueError("DLP data types must be unique.")
+        return self
+
+
+class SecurityPolicyRecord(SecurityPolicyUpdateRequest):
+    policy_id: str
+    organization_id: str
+    updated_by: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class SecurityFindingRecord(BaseModel):
+    finding_id: str
+    organization_id: str
+    actor_id: str
+    control_type: Literal["dlp", "malware"]
+    action: Literal["audited", "blocked"]
+    resource_type: str
+    resource_name: str
+    content_hash: str
+    findings: list[dict[str, object]] = Field(default_factory=list)
+    created_at: str | None = None
+
+
+class RetentionPreview(BaseModel):
+    enabled: bool
+    cutoff_by_category: dict[str, str]
+    eligible_by_category: dict[str, int]
+    total_eligible: int
+
+
+class RetentionExecuteRequest(BaseModel):
+    confirm: bool = False
+
+
+class RetentionExecutionResult(BaseModel):
+    deleted_by_category: dict[str, int]
+    total_deleted: int
+
+
+class KeyRotationRequest(BaseModel):
+    confirm: bool = False
+
+
+class KeyRotationStatus(BaseModel):
+    active_key_id: str
+    available_key_ids: list[str]
+    ciphertexts_by_key_id: dict[str, int]
+    rotatable_ciphertexts: int
+
+
+class KeyRotationResult(BaseModel):
+    active_key_id: str
+    rotated_ciphertexts: int
+
+
+class SecurityPosture(BaseModel):
+    environment: str
+    production_requirements_enforced: bool
+    secret_source: Literal["environment", "file", "development-default"]
+    encryption_active_key_id: str
+    encryption_key_count: int
+    rate_limit_enabled: bool
+    rate_limit_backend: Literal["memory", "redis"]
+    malware_scanner_mode: Literal["disabled", "basic", "clamav"]
+    malware_fail_closed: bool
+    security_headers_enabled: bool
+    policy: SecurityPolicyRecord
+    recent_findings: list[SecurityFindingRecord] = Field(default_factory=list)
+
+
 class MCPToolCallRequest(BaseModel):
     tool_name: str
     scope: str | None = None

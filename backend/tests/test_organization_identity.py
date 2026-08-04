@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jose import jwt
+import jwt
 
 from app.core.database import get_connection
 from app.main import app

@@ -1,8 +1,10 @@
 from functools import lru_cache
+import json
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -12,7 +14,21 @@ class Settings(BaseSettings):
     app_name: str = Field(default="Secure Agentic AI Work OS", validation_alias="APP_NAME")
     app_env: str = Field(default="development", validation_alias="APP_ENV")
     secret_key: str = Field(default="change-me", validation_alias="APP_SECRET_KEY")
-    jwt_algorithm: str = Field(default="HS256", validation_alias="APP_JWT_ALGORITHM")
+    secret_key_file: str | None = Field(
+        default=None, validation_alias="APP_SECRET_KEY_FILE"
+    )
+    encryption_keyring: str | None = Field(
+        default=None, validation_alias="APP_ENCRYPTION_KEYRING"
+    )
+    encryption_keyring_file: str | None = Field(
+        default=None, validation_alias="APP_ENCRYPTION_KEYRING_FILE"
+    )
+    active_encryption_key_id: str = Field(
+        default="primary", validation_alias="APP_ACTIVE_ENCRYPTION_KEY_ID"
+    )
+    jwt_algorithm: Literal["HS256", "HS384", "HS512"] = Field(
+        default="HS256", validation_alias="APP_JWT_ALGORITHM"
+    )
     access_token_expire_minutes: int = Field(
         default=60, validation_alias="APP_ACCESS_TOKEN_EXPIRE_MINUTES"
     )
@@ -64,6 +80,62 @@ class Settings(BaseSettings):
     upload_dir: str = Field(
         default=str(BASE_DIR / "data" / "uploads"),
         validation_alias="APP_UPLOAD_DIR",
+    )
+    upload_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        ge=1_024,
+        le=250 * 1024 * 1024,
+        validation_alias="APP_UPLOAD_MAX_BYTES",
+    )
+    dlp_scan_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=1_024,
+        le=50 * 1024 * 1024,
+        validation_alias="APP_DLP_SCAN_MAX_BYTES",
+    )
+    malware_scanner_mode: Literal["disabled", "basic", "clamav"] = Field(
+        default="basic", validation_alias="APP_MALWARE_SCANNER_MODE"
+    )
+    malware_fail_closed: bool = Field(
+        default=False, validation_alias="APP_MALWARE_FAIL_CLOSED"
+    )
+    clamav_host: str = Field(default="127.0.0.1", validation_alias="CLAMAV_HOST")
+    clamav_port: int = Field(default=3310, ge=1, le=65535, validation_alias="CLAMAV_PORT")
+    clamav_timeout_seconds: float = Field(
+        default=10.0,
+        ge=0.5,
+        le=120.0,
+        validation_alias="CLAMAV_TIMEOUT_SECONDS",
+    )
+    rate_limit_enabled: bool = Field(
+        default=True, validation_alias="APP_RATE_LIMIT_ENABLED"
+    )
+    rate_limit_backend: Literal["memory", "redis"] = Field(
+        default="memory", validation_alias="APP_RATE_LIMIT_BACKEND"
+    )
+    rate_limit_requests: int = Field(
+        default=120, ge=1, le=100_000, validation_alias="APP_RATE_LIMIT_REQUESTS"
+    )
+    rate_limit_auth_requests: int = Field(
+        default=10, ge=1, le=10_000, validation_alias="APP_RATE_LIMIT_AUTH_REQUESTS"
+    )
+    rate_limit_upload_requests: int = Field(
+        default=20, ge=1, le=10_000, validation_alias="APP_RATE_LIMIT_UPLOAD_REQUESTS"
+    )
+    rate_limit_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=3_600,
+        validation_alias="APP_RATE_LIMIT_WINDOW_SECONDS",
+    )
+    security_headers_enabled: bool = Field(
+        default=True, validation_alias="APP_SECURITY_HEADERS_ENABLED"
+    )
+    retention_batch_size: int = Field(
+        default=1_000,
+        ge=1,
+        le=10_000,
+        validation_alias="APP_RETENTION_BATCH_SIZE",
     )
     async_jobs_enabled: bool = Field(
         default=False, validation_alias="APP_ASYNC_JOBS_ENABLED"
@@ -208,7 +280,66 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=str(BASE_DIR.parent / ".env"))
 
+    @model_validator(mode="after")
+    def load_secret_files_and_validate_production(self) -> "Settings":
+        if self.secret_key_file:
+            self.secret_key = _read_secret_file(self.secret_key_file, "application secret key")
+        if self.encryption_keyring_file:
+            self.encryption_keyring = _read_secret_file(
+                self.encryption_keyring_file, "encryption keyring"
+            )
+        parsed_keyring: dict[str, object] | None = None
+        if self.encryption_keyring:
+            try:
+                candidate = json.loads(self.encryption_keyring)
+            except json.JSONDecodeError as exc:
+                raise ValueError("APP_ENCRYPTION_KEYRING must be a JSON object.") from exc
+            if not isinstance(candidate, dict) or not candidate:
+                raise ValueError("APP_ENCRYPTION_KEYRING must contain at least one key.")
+            if self.active_encryption_key_id not in candidate:
+                raise ValueError(
+                    "APP_ACTIVE_ENCRYPTION_KEY_ID is absent from the encryption keyring."
+                )
+            parsed_keyring = candidate
+
+        if self.app_env.lower() == "production":
+            if self.secret_key == "change-me" or len(self.secret_key) < 32:
+                raise ValueError(
+                    "Production requires APP_SECRET_KEY or APP_SECRET_KEY_FILE "
+                    "with at least 32 characters."
+                )
+            if not self.encryption_keyring:
+                raise ValueError(
+                    "Production requires APP_ENCRYPTION_KEYRING or "
+                    "APP_ENCRYPTION_KEYRING_FILE."
+                )
+            if parsed_keyring is None or any(
+                not isinstance(value, str) or len(value) < 32
+                for value in parsed_keyring.values()
+            ):
+                raise ValueError(
+                    "Every production encryption key must contain at least 32 characters."
+                )
+            if self.rate_limit_backend != "redis":
+                raise ValueError("Production requires APP_RATE_LIMIT_BACKEND=redis.")
+            if self.malware_scanner_mode == "disabled" or not self.malware_fail_closed:
+                raise ValueError(
+                    "Production requires malware scanning with APP_MALWARE_FAIL_CLOSED=true."
+                )
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def _read_secret_file(path_value: str, label: str) -> str:
+    path = Path(path_value)
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"Could not read {label} file: {path}") from exc
+    if not value:
+        raise ValueError(f"The {label} file is empty: {path}")
+    return value

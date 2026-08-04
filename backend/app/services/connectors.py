@@ -11,7 +11,8 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 import httpx
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 from app.core.config import get_settings
 from app.core.crypto import decrypt_secret, encrypt_secret
@@ -1769,7 +1770,7 @@ class ConnectorService:
                     algorithms=["HS256"],
                     options={"verify_aud": False},
                 )
-            except JWTError:
+            except InvalidTokenError:
                 return False
             audience = claims.get("aud")
             audiences = audience if isinstance(audience, list) else [audience]
@@ -1813,13 +1814,21 @@ class ConnectorService:
                 for candidate in keys
                 if candidate.get("kid") == header.get("kid")
             )
+            verification_key = jwt.PyJWK.from_dict(key).key
             claims = jwt.decode(
                 token,
-                key,
+                verification_key,
                 algorithms=["RS256"],
                 audience=audience,
             )
-        except (JWTError, httpx.HTTPError, KeyError, StopIteration, TypeError, ValueError):
+        except (
+            InvalidTokenError,
+            httpx.HTTPError,
+            KeyError,
+            StopIteration,
+            TypeError,
+            ValueError,
+        ):
             return False
         issuer = claims.get("iss")
         email = str(claims.get("email") or "")

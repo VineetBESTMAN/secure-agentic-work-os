@@ -15,6 +15,12 @@ The application runs locally with Docker Compose and supports testing with real 
 - PostgreSQL with `pgvector` and HNSW indexing, plus a SQLite fallback for local development
 - Document inspection, metadata editing, re-indexing, deletion, and unsafe-content review
 - Prompt-injection detection for uploaded content and tool arguments
+- Tenant-configurable DLP detection with audit/quarantine and blocking modes
+- Upload size, archive-safety, active-content, executable, and malware-signature scanning
+- Optional fail-closed ClamAV INSTREAM scanning for production uploads
+- Redis-backed request rate limiting and hardened API response headers
+- Versioned encrypted-secret keyrings with tenant-scoped online re-encryption
+- Previewable, confirmed, tenant-scoped retention enforcement with audit evidence
 - Redis/RQ jobs for uploads, re-indexing, and connector imports
 - Constrained LLM or deterministic planning with server-validated MCP tools, scopes, arguments, and approval requirements
 - Isolated OpenClaw service integration with tenant-bound, revocable MCP credentials and narrow tool filters
@@ -150,6 +156,48 @@ Uploaded content, extracted chunks, workflows, jobs, approvals, and audit record
 - Security-relevant activity is recorded in the audit log.
 
 External actions never fall back to a fake success response. If the required provider is disconnected, expired, or missing permission, the governed execution fails with a reconnect or scope error and retains its audit trail.
+
+## Advanced security controls
+
+Administrators configure DLP, malware scanning, and retention in the **Advanced Security Controls** panel. DLP findings persist only the finding type, a one-way fingerprint, the uploaded-content hash, and safe metadata; matched secrets are never stored in finding records. Audit mode marks the document unsafe so retrieval excludes it, while block mode rejects it before document persistence. The asynchronous upload path performs a malware preflight before writing its staging file.
+
+The built-in scanner rejects the EICAR test signature, executable content, executable archive members, unsafe archive expansion, malformed archives, and active PDF content. A production deployment can use ClamAV's `INSTREAM` protocol:
+
+```text
+APP_MALWARE_SCANNER_MODE=clamav
+APP_MALWARE_FAIL_CLOSED=true
+CLAMAV_HOST=clamav
+CLAMAV_PORT=3310
+```
+
+Rate limits use hashed principals and return standard limit and retry headers. Local development defaults to an in-memory backend; multi-instance deployments must use Redis:
+
+```text
+APP_RATE_LIMIT_BACKEND=redis
+APP_RATE_LIMIT_REQUESTS=120
+APP_RATE_LIMIT_AUTH_REQUESTS=10
+APP_RATE_LIMIT_UPLOAD_REQUESTS=20
+```
+
+Encrypted connector tokens, OAuth verifiers, webhook secrets, synchronization cursors, and OIDC secrets use a versioned envelope. Configure a JSON keyring with the old key retained during rotation, choose the active key, inspect the tenant's rotation status, then explicitly rotate from the administration panel:
+
+```text
+APP_ENCRYPTION_KEYRING={"2026-07":"old-secret","2026-10":"new-secret"}
+APP_ACTIVE_ENCRYPTION_KEY_ID=2026-10
+```
+
+Key IDs and counts are visible to administrators; key material is never returned by the API. Existing unversioned ciphertext remains decryptable through the legacy application secret and can be migrated online.
+
+Retention starts disabled. Administrators first save category-specific periods, inspect the tenant-only preview, and explicitly confirm enforcement. Each run deletes at most `APP_RETENTION_BATCH_SIZE` expired records per category and writes a fresh audit event. It does not delete documents, users, memberships, workflows, approvals, connector accounts, or uploaded files.
+
+For secret-file injection through Docker/Kubernetes secrets or a dedicated secret manager sidecar, use:
+
+```text
+APP_SECRET_KEY_FILE=/run/secrets/workos-jwt-key
+APP_ENCRYPTION_KEYRING_FILE=/run/secrets/workos-encryption-keyring
+```
+
+When `APP_ENV=production`, startup rejects the demo JWT key, missing encryption keyring, non-Redis rate limiting, disabled malware scanning, or non-fail-closed malware configuration.
 
 ## Organizations, invitations, and SSO
 
@@ -454,4 +502,4 @@ GitHub Actions run backend tests, an Alembic upgrade/downgrade round trip, the f
 
 ## Public repository safety
 
-This repository is configured for local demonstration, not direct internet exposure. The Docker defaults include known demo credentials, a development database password, and `APP_SECRET_KEY=change-me`. Keep `.env` files and provider secrets untracked, and replace all default secrets before exposing any service outside the local machine.
+This repository is configured for local demonstration, not direct internet exposure. The Docker defaults include known demo credentials, a development database password, `APP_SECRET_KEY=change-me`, and a development encryption keyring. Keep `.env`, `.secrets`, and provider credentials untracked. Production mode deliberately refuses these defaults and requires external secret files or injected secret values before startup.

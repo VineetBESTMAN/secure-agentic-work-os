@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
-from jose import jwk, jwt
+import jwt
+from jwt.algorithms import RSAAlgorithm
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.core.config import get_settings
@@ -450,7 +451,10 @@ def test_jira_webhook_requires_signed_bearer_and_remote_subscription_binding(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("JIRA_CLIENT_ID", "jira-webhook-client")
-    monkeypatch.setenv("JIRA_CLIENT_SECRET", "jira-webhook-secret")
+    monkeypatch.setenv(
+        "JIRA_CLIENT_SECRET",
+        "jira-webhook-secret-with-at-least-32-characters",
+    )
     get_settings.cache_clear()
     now = datetime.now(timezone.utc)
     connector_id = f"con_jira_webhook_{uuid4().hex}"
@@ -496,7 +500,7 @@ def test_jira_webhook_requires_signed_bearer_and_remote_subscription_binding(
             "iat": int(now.timestamp()),
             "exp": int((now + timedelta(minutes=5)).timestamp()),
         },
-        "jira-webhook-secret",
+        "jira-webhook-secret-with-at-least-32-characters",
         algorithm="HS256",
     )
     headers = {
@@ -520,7 +524,7 @@ def test_jira_webhook_requires_signed_bearer_and_remote_subscription_binding(
         invalid_signature = client.post(
             f"/api/connectors/webhooks/jira/{subscription_id}",
             headers={
-                "Authorization": f"Bearer {jwt.encode({'exp': int((now + timedelta(minutes=5)).timestamp())}, 'wrong-secret', algorithm='HS256')}",
+                "Authorization": f"Bearer {jwt.encode({'exp': int((now + timedelta(minutes=5)).timestamp())}, 'wrong-secret-with-at-least-32-characters', algorithm='HS256')}",
                 "X-Atlassian-Webhook-Identifier": f"jira-delivery-{uuid4().hex}",
             },
             json={"webhookEvent": "jira:issue_updated", "matchedWebhookIds": [1000]},
@@ -574,7 +578,7 @@ def test_gmail_pubsub_webhook_requires_google_oidc_identity(monkeypatch) -> None
         )
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    public_jwk = jwk.construct(private_key.public_key(), algorithm="RS256").to_dict()
+    public_jwk = RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
     public_jwk.update({"kid": "google-validation-key", "use": "sig"})
     real_async_client = httpx.AsyncClient
 
