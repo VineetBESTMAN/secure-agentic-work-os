@@ -54,7 +54,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
             for row in connection.execute("PRAGMA table_info(connector_accounts)").fetchall()
         }
     assert "last_refresh_at" in connector_columns
-    assert revision == ("20260725_0010",)
+    assert revision == ("20260804_0011",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -69,7 +69,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert revision == ("20260725_0010",)
+        assert revision == ("20260804_0011",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -161,14 +161,20 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
             """
         ).fetchall()
         organization = connection.execute(
-            "SELECT organization_id, slug FROM organizations WHERE organization_id = 'org_default'"
+            "SELECT organization_id, slug FROM organizations "
+            "WHERE organization_id = 'org_default'"
         ).fetchone()
         membership = connection.execute(
-            "SELECT organization_id, user_id, role FROM organization_memberships WHERE user_id = 'existing-user'"
+            "SELECT organization_id, user_id, role FROM organization_memberships "
+            "WHERE user_id = 'existing-user'"
         ).fetchone()
         workflow_tenant = connection.execute(
             "SELECT organization_id FROM agent_workflows WHERE workflow_id = 'wf_existing'"
         ).fetchone()
+        document_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+        }
         membership_scopes = json.loads(
             connection.execute(
                 "SELECT scopes_json FROM organization_memberships WHERE user_id = 'existing-user'"
@@ -176,7 +182,7 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         )
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260725_0010",)
+    assert revision == ("20260804_0011",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
@@ -185,9 +191,53 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
     assert organization == ("org_default", "default")
     assert membership == ("org_default", "existing-user", "admin")
     assert workflow_tenant == ("org_default",)
+    assert {"storage_backend", "storage_key"} <= document_columns
     assert {
         "connectors:read",
         "connectors:manage",
         "connectors:sync",
         "connectors:act",
     } <= set(membership_scopes)
+
+
+def test_object_storage_migration_backfills_existing_documents(tmp_path: Path) -> None:
+    database_path = tmp_path / "storage-backfill.db"
+    database_url = _sqlite_url(database_path)
+    upgrade_database(database_url, revision="20260725_0010")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO documents (
+                document_id, title, filename, classification, owner_team, summary,
+                uploaded_by, unsafe, unsafe_reasons_json, organization_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "doc_existing",
+                "Existing document",
+                "existing.txt",
+                "internal",
+                "operations",
+                "Existing content",
+                "existing-user",
+                0,
+                "[]",
+                "org_default",
+            ),
+        )
+
+    upgrade_database(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        storage = connection.execute(
+            """
+            SELECT storage_backend, storage_key
+            FROM documents
+            WHERE document_id = 'doc_existing'
+            """
+        ).fetchone()
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+
+    assert storage == ("local", "doc_existing_existing.txt")
+    assert revision == ("20260804_0011",)

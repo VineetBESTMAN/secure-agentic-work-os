@@ -261,11 +261,28 @@ def test_production_secret_files_and_fail_closed_controls_are_required(
     )
     settings = Settings(
         APP_ENV="production",
+        APP_PUBLIC_BASE_URL="https://workos.example.com",
+        APP_CORS_ORIGINS="https://workos.example.com",
+        APP_OIDC_REDIRECT_BASE_URL="https://workos.example.com/api/auth/oidc",
+        APP_OAUTH_REDIRECT_BASE_URL="https://workos.example.com/api/connectors",
+        APP_CONNECTOR_WEBHOOK_BASE_URL=(
+            "https://workos.example.com/api/connectors/webhooks"
+        ),
+        APP_MCP_ISSUER_URL="https://workos.example.com",
+        APP_MCP_SERVER_URL="https://workos.example.com/protocol/mcp",
         APP_SECRET_KEY_FILE=str(secret_file),
         APP_ENCRYPTION_KEYRING_FILE=str(keyring_file),
+        DATABASE_URL="postgresql://workos:secret@db.example.com/workos?sslmode=require",
+        APP_DATABASE_TLS_REQUIRED=True,
+        REDIS_URL="rediss://cache.example.com:6379/0",
+        APP_REDIS_TLS_REQUIRED=True,
         APP_RATE_LIMIT_BACKEND="redis",
         APP_MALWARE_SCANNER_MODE="clamav",
         APP_MALWARE_FAIL_CLOSED=True,
+        APP_OBJECT_STORAGE_BACKEND="s3",
+        APP_OBJECT_STORAGE_BUCKET="workos-production",
+        APP_OBJECT_STORAGE_SSE="AES256",
+        APP_METRICS_TOKEN="m" * 32,
         _env_file=None,
     )
     assert settings.secret_key == "j" * 48

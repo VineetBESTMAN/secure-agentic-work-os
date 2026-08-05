@@ -1,0 +1,64 @@
+groups:
+  - name: secure-agentic-work-os
+    rules:
+      - alert: WorkOSBackendDown
+        expr: up{job="secure-agentic-work-os"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Secure Agentic Work OS backend is unreachable
+          description: Prometheus has been unable to scrape the backend for two minutes.
+
+      - alert: WorkOSNotReady
+        expr: workos_readiness == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Secure Agentic Work OS is not ready
+          description: At least one required database, Redis, or object-storage dependency is unavailable.
+
+      - alert: WorkOSHighErrorRate
+        expr: |
+          sum(rate(workos_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(workos_http_requests_total[5m])), 0.01)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Secure Agentic Work OS has an elevated server-error rate
+          description: More than five percent of requests have returned HTTP 5xx for ten minutes.
+
+      - alert: WorkOSHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(workos_http_request_duration_seconds_bucket[10m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Secure Agentic Work OS p95 latency is high
+          description: The ten-minute p95 HTTP latency has exceeded two seconds.
+
+      - alert: WorkOSBackupMissing
+        expr: workos_backup_configured == 1 and workos_backup_age_seconds < 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: No PostgreSQL backup is visible
+          description: Object storage is configured, but no database backup object was found.
+
+      - alert: WorkOSBackupStale
+        expr: workos_backup_configured == 1 and workos_backup_age_seconds > workos_backup_rpo_seconds
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: PostgreSQL backup exceeds the recovery-point objective
+          description: The newest backup object is older than the configured RPO.

@@ -114,6 +114,8 @@ def test_document_management_lifecycle() -> None:
         content="Renewal policies require manager review before external summaries are sent.",
     )
     document_id = document["document_id"]
+    assert document["storage_backend"] == "local"
+    assert document["storage_key"].startswith("documents/org_default/")
 
     detail = client.get(f"/api/documents/{document_id}", headers=_auth_headers())
     assert detail.status_code == 200

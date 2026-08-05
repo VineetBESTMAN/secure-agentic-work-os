@@ -6,7 +6,10 @@ __pycache__/
 node_modules/
 dist/
 .env
+.env.production
 .secrets/
+*.dump
+*.dump.sha256
 *.pyc
 coverage/
 backend/data/
