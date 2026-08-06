@@ -54,7 +54,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
             for row in connection.execute("PRAGMA table_info(connector_accounts)").fetchall()
         }
     assert "last_refresh_at" in connector_columns
-    assert revision == ("20260804_0011",)
+    assert revision == ("20260805_0012",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -69,7 +69,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert revision == ("20260804_0011",)
+        assert revision == ("20260805_0012",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -182,7 +182,7 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         )
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260804_0011",)
+    assert revision == ("20260805_0012",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
@@ -240,4 +240,49 @@ def test_object_storage_migration_backfills_existing_documents(tmp_path: Path) -
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
 
     assert storage == ("local", "doc_existing_existing.txt")
-    assert revision == ("20260804_0011",)
+    assert revision == ("20260805_0012",)
+
+
+def test_reliability_migration_preserves_existing_job_state(tmp_path: Path) -> None:
+    database_path = tmp_path / "reliability-backfill.db"
+    database_url = _sqlite_url(database_path)
+    upgrade_database(database_url, revision="20260804_0011")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO background_jobs (
+                job_id, job_type, status, detail_json, result_json,
+                created_by, organization_id
+            ) VALUES ('job_existing', 'document.ingest', 'running', '{}',
+                      '{"progress": 25}', 'existing-user', 'org_default')
+            """
+        )
+
+    upgrade_database(database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        job = connection.execute(
+            "SELECT * FROM background_jobs WHERE job_id = 'job_existing'"
+        ).fetchone()
+        webhook_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(connector_webhook_deliveries)"
+            ).fetchall()
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(background_jobs)"
+            ).fetchall()
+        }
+
+    assert job["status"] == "running"
+    assert json.loads(job["result_json"]) == {"progress": 25}
+    assert job["attempt_count"] == 0
+    assert job["max_attempts"] == 3
+    assert job["last_error"] is None
+    assert {"duplicate_count", "last_duplicate_at"} <= webhook_columns
+    assert "idx_background_jobs_organization_status_updated" in indexes

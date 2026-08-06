@@ -1,0 +1,37 @@
+name: Reliability
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-fault-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip "setuptools>=83.0.0"
+          python -m pip install -e ".[dev]"
+      - name: Run scale and fault tests
+        working-directory: backend
+        run: python -m pytest tests/test_scale_reliability.py
+
+  isolated-postgres-recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate isolated reliability Compose
+        run: docker compose -f docker-compose.reliability.yml config --quiet
+      - name: Recreate and restore disposable PostgreSQL
+        env:
+          RELIABILITY_PROJECT_NAME: secure-work-os-reliability-${{ github.run_id }}
+        run: bash scripts/reliability/verify_postgres_recovery.sh

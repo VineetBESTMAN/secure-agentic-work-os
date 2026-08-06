@@ -719,10 +719,15 @@ class PolicyCreateRequest(BaseModel):
 class JobRecord(BaseModel):
     job_id: str
     job_type: str
-    status: Literal["queued", "running", "completed", "failed"]
+    status: Literal["queued", "running", "completed", "failed", "dead_lettered"]
     detail: dict[str, object] = Field(default_factory=dict)
     result: dict[str, object] = Field(default_factory=dict)
     created_by: str
+    attempt_count: int = 0
+    max_attempts: int = 3
+    last_error: str | None = None
+    heartbeat_at: str | None = None
+    dead_lettered_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -934,6 +939,19 @@ class BackupStatus(BaseModel):
     detail: str
 
 
+class ReliabilityStatus(BaseModel):
+    available: bool = True
+    queued_jobs: int = 0
+    running_jobs: int = 0
+    failed_jobs: int = 0
+    dead_lettered_jobs: int = 0
+    stale_running_jobs: int = 0
+    provider_accounts_in_error: int = 0
+    webhook_deliveries_24h: int = 0
+    webhook_duplicates_24h: int = 0
+    detail: str
+
+
 class OperationsStatus(BaseModel):
     environment: str
     public_base_url: str
@@ -947,3 +965,4 @@ class OperationsStatus(BaseModel):
     ready: bool
     components: list[OperationalComponent] = Field(default_factory=list)
     backup: BackupStatus
+    reliability: ReliabilityStatus

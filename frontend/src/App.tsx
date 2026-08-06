@@ -351,14 +351,31 @@ type OperationsStatus = {
     stale: boolean;
     detail: string;
   };
+  reliability: {
+    available: boolean;
+    queued_jobs: number;
+    running_jobs: number;
+    failed_jobs: number;
+    dead_lettered_jobs: number;
+    stale_running_jobs: number;
+    provider_accounts_in_error: number;
+    webhook_deliveries_24h: number;
+    webhook_duplicates_24h: number;
+    detail: string;
+  };
 };
 
 type JobRecord = {
   job_id: string;
   job_type: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "dead_lettered";
   detail: Record<string, unknown>;
   result: Record<string, unknown>;
+  attempt_count: number;
+  max_attempts: number;
+  last_error: string | null;
+  heartbeat_at: string | null;
+  dead_lettered_at: string | null;
 };
 
 type AsyncJobResponse = {
@@ -1959,7 +1976,7 @@ export default function App() {
                 <Activity size={20} />
                 <div>
                   <h2>Production Operations</h2>
-                  <small>Readiness, managed services, durable storage, and backup RPO</small>
+                  <small>Readiness, recovery posture, and durable reliability signals</small>
                 </div>
               </div>
               <span
@@ -2025,6 +2042,32 @@ export default function App() {
                   )}
                   <small>
                     Target RPO: {Math.round(operationsStatus.backup.rpo_seconds / 3600)} hours
+                  </small>
+                </article>
+                <h3>Reliability posture</h3>
+                <article className="item">
+                  <strong>
+                    {operationsStatus.reliability.available
+                      ? operationsStatus.reliability.dead_lettered_jobs > 0 ||
+                        operationsStatus.reliability.stale_running_jobs > 0
+                        ? "Operator attention required"
+                        : "No stalled work detected"
+                      : "Reliability counters unavailable"}
+                  </strong>
+                  <span>{operationsStatus.reliability.detail}</span>
+                  <small>
+                    Jobs: {operationsStatus.reliability.queued_jobs} queued,{
+                    " "}{operationsStatus.reliability.running_jobs} running,{
+                    " "}{operationsStatus.reliability.failed_jobs} failed,{
+                    " "}{operationsStatus.reliability.dead_lettered_jobs} dead-lettered
+                  </small>
+                  <small>
+                    Stale: {operationsStatus.reliability.stale_running_jobs} · Provider errors:{
+                    " "}{operationsStatus.reliability.provider_accounts_in_error}
+                  </small>
+                  <small>
+                    Webhooks (24h): {operationsStatus.reliability.webhook_deliveries_24h} accepted ·{
+                    " "}{operationsStatus.reliability.webhook_duplicates_24h} deduplicated
                   </small>
                 </article>
               </div>

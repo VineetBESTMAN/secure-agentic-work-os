@@ -62,3 +62,30 @@ groups:
         annotations:
           summary: PostgreSQL backup exceeds the recovery-point objective
           description: The newest backup object is older than the configured RPO.
+
+      - alert: WorkOSDeadLetteredJobs
+        expr: workos_background_jobs{status="dead_lettered"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Secure Agentic Work OS has dead-lettered jobs
+          description: At least one background job exhausted its safe retry policy and requires operator review.
+
+      - alert: WorkOSStaleRunningJobs
+        expr: workos_stale_running_jobs > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Secure Agentic Work OS has stale running jobs
+          description: At least one running job stopped updating its heartbeat beyond the configured threshold.
+
+      - alert: WorkOSProviderAccountsInError
+        expr: workos_provider_accounts_in_error > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A provider connector requires attention
+          description: One or more connected provider accounts report a synchronization error.
