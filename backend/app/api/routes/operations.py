@@ -12,4 +12,4 @@ router = APIRouter(prefix="/operations", tags=["operations"])
 @router.get("/status", response_model=OperationsStatus)
 def get_operations_status(user=Depends(get_current_user)) -> OperationsStatus:
     require_roles(user.role, allowed_roles={"admin", "manager"})
-    return operations_service.status()
+    return operations_service.status(organization_id=user.organization_id)

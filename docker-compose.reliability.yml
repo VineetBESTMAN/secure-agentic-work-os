@@ -1,0 +1,29 @@
+services:
+  postgres-reliability:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: workos_reliability
+      POSTGRES_USER: reliability
+      POSTGRES_PASSWORD: reliability-test-only
+    tmpfs:
+      - /var/lib/postgresql/data:size=512m,mode=0700
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reliability -d workos_reliability"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true
+
+  redis-reliability:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data:size=64m,mode=0700
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true

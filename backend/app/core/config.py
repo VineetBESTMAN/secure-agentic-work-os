@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     database_tls_required: bool = Field(
         default=False, validation_alias="APP_DATABASE_TLS_REQUIRED"
     )
+    sqlite_busy_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        validation_alias="APP_SQLITE_BUSY_TIMEOUT_SECONDS",
+    )
     run_migrations_on_startup: bool = Field(
         default=True, validation_alias="APP_RUN_MIGRATIONS_ON_STARTUP"
     )
@@ -216,6 +222,22 @@ class Settings(BaseSettings):
     job_timeout_seconds: int = Field(
         default=600, validation_alias="APP_JOB_TIMEOUT_SECONDS"
     )
+    job_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias="APP_JOB_MAX_ATTEMPTS",
+    )
+    job_retry_intervals: str = Field(
+        default="5,30",
+        validation_alias="APP_JOB_RETRY_INTERVALS",
+    )
+    job_stale_seconds: int = Field(
+        default=900,
+        ge=30,
+        le=86_400,
+        validation_alias="APP_JOB_STALE_SECONDS",
+    )
     metrics_enabled: bool = Field(
         default=True, validation_alias="APP_METRICS_ENABLED"
     )
@@ -325,6 +347,24 @@ class Settings(BaseSettings):
         ge=1,
         le=1000,
         validation_alias="APP_CONNECTOR_SYNC_MAX_ITEMS",
+    )
+    connector_read_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias="APP_CONNECTOR_READ_MAX_RETRIES",
+    )
+    connector_retry_base_delay_seconds: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=30.0,
+        validation_alias="APP_CONNECTOR_RETRY_BASE_DELAY_SECONDS",
+    )
+    connector_retry_max_delay_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias="APP_CONNECTOR_RETRY_MAX_DELAY_SECONDS",
     )
     google_client_id: str | None = Field(default=None, validation_alias="GOOGLE_CLIENT_ID")
     google_client_secret: str | None = Field(

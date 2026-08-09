@@ -44,6 +44,7 @@ from app.services.connector_providers import (
 )
 from app.services.jobs import job_service
 from app.services.rag import rag_service
+from app.services.resilience import retry_idempotent_provider_read
 
 PROVIDERS: dict[str, dict[str, Any]] = {
     "google": {
@@ -366,11 +367,7 @@ class ConnectorService:
                 },
             )
         except Exception as exc:
-            job_service.update(
-                job.job_id,
-                status="failed",
-                result={"error": str(exc)},
-            )
+            job_service.fail(job.job_id, exc)
             raise
 
         return ConnectorImportResponse(job=job, imported_documents=imported)
@@ -456,11 +453,7 @@ class ConnectorService:
                 },
             )
         except Exception as exc:
-            job_service.update(
-                job.job_id,
-                status="failed",
-                result={"error": str(exc)},
-            )
+            job_service.fail(job.job_id, exc)
             raise
 
         return ConnectorImportResponse(job=job, imported_documents=imported)
@@ -506,7 +499,7 @@ class ConnectorService:
         try:
             token = await self._access_token(provider, user.organization_id)
             metadata = decode_json(account["metadata_json"], {})
-            for resource in resources:
+            for resource_index, resource in enumerate(resources, start=1):
                 state = self._ensure_sync_state(
                     account=account,
                     provider=provider,
@@ -516,12 +509,14 @@ class ConnectorService:
                 cursor = decrypt_secret(state["cursor_cipher"])
                 self._set_sync_state_running(state["sync_state_id"])
                 try:
-                    batch = await sync_provider_resource(
-                        provider=provider,
-                        resource=resource,
-                        access_token=token,
-                        cursor=cursor,
-                        account_metadata=metadata,
+                    batch = await retry_idempotent_provider_read(
+                        lambda: sync_provider_resource(
+                            provider=provider,
+                            resource=resource,
+                            access_token=token,
+                            cursor=cursor,
+                            account_metadata=metadata,
+                        )
                     )
                     changed = 0
                     for item in batch.items:
@@ -542,6 +537,20 @@ class ConnectorService:
                     )
                     total_seen += len(batch.items)
                     total_changed += changed
+                    job_service.update(
+                        job.job_id,
+                        status="running",
+                        result={
+                            "progress": min(
+                                95,
+                                5 + int((resource_index / len(resources)) * 90),
+                            ),
+                            "resources_completed": resource_index,
+                            "resources_total": len(resources),
+                            "items_seen": total_seen,
+                            "items_changed": total_changed,
+                        },
+                    )
                 except Exception as exc:
                     self._fail_sync_state(state["sync_state_id"], str(exc))
                     raise
@@ -878,29 +887,16 @@ class ConnectorService:
         )
         event_type = self._webhook_event_type(provider, headers, payload)
         with get_connection() as connection:
-            existing = connection.execute(
-                """
-                SELECT delivery_id FROM connector_webhook_deliveries
-                WHERE subscription_id = ? AND external_delivery_id = ?
-                """,
-                (subscription_id, external_delivery_id),
-            ).fetchone()
-            if existing is not None:
-                return WebhookDeliveryResponse(
-                    duplicate=True,
-                    delivery_id=existing["delivery_id"],
-                    sync_requested=False,
-                    challenge=self._webhook_challenge(payload),
-                )
             delivery_id = f"whd_{uuid4().hex}"
             now = datetime.now(timezone.utc).isoformat()
-            connection.execute(
+            inserted = connection.execute(
                 """
                 INSERT INTO connector_webhook_deliveries (
                     delivery_id, organization_id, subscription_id, provider,
                     external_delivery_id, event_type, payload_hash,
                     signature_valid, processed_at, received_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(subscription_id, external_delivery_id) DO NOTHING
                 """,
                 (
                     delivery_id,
@@ -915,12 +911,51 @@ class ConnectorService:
                     now,
                 ),
             )
+            if inserted.rowcount == 0:
+                connection.execute(
+                    """
+                    UPDATE connector_webhook_deliveries
+                    SET duplicate_count = duplicate_count + 1, last_duplicate_at = ?
+                    WHERE organization_id = ? AND subscription_id = ?
+                      AND external_delivery_id = ?
+                    """,
+                    (
+                        now,
+                        subscription["organization_id"],
+                        subscription_id,
+                        external_delivery_id,
+                    ),
+                )
+                existing = connection.execute(
+                    """
+                    SELECT delivery_id FROM connector_webhook_deliveries
+                    WHERE organization_id = ? AND subscription_id = ?
+                      AND external_delivery_id = ?
+                    """,
+                    (
+                        subscription["organization_id"],
+                        subscription_id,
+                        external_delivery_id,
+                    ),
+                ).fetchone()
+                if existing is None:
+                    raise RuntimeError("Webhook deduplication record was not found.")
+                return WebhookDeliveryResponse(
+                    duplicate=True,
+                    delivery_id=existing["delivery_id"],
+                    sync_requested=False,
+                    challenge=self._webhook_challenge(payload),
+                )
             sync_state = connection.execute(
                 """
                 SELECT sync_state_id FROM connector_sync_states
-                WHERE connector_id = ? AND resource = ?
+                WHERE organization_id = ? AND connector_id = ? AND resource = ?
                 """,
-                (subscription["connector_id"], subscription["resource"]),
+                (
+                    subscription["organization_id"],
+                    subscription["connector_id"],
+                    subscription["resource"],
+                ),
             ).fetchone()
             if sync_state is None:
                 connection.execute(
@@ -944,9 +979,13 @@ class ConnectorService:
                 connection.execute(
                     """
                     UPDATE connector_sync_states SET status = 'pending', updated_at = ?
-                    WHERE sync_state_id = ?
+                    WHERE sync_state_id = ? AND organization_id = ?
                     """,
-                    (now, sync_state["sync_state_id"]),
+                    (
+                        now,
+                        sync_state["sync_state_id"],
+                        subscription["organization_id"],
+                    ),
                 )
         return WebhookDeliveryResponse(
             delivery_id=delivery_id,

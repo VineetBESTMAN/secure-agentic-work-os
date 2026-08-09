@@ -39,9 +39,15 @@ def get_connection():
 
     database_path = Path(settings.database_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(
+        database_path,
+        timeout=get_settings().sqlite_busy_timeout_seconds,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute(
+        f"PRAGMA busy_timeout = {int(get_settings().sqlite_busy_timeout_seconds * 1000)}"
+    )
     return connection
 
 

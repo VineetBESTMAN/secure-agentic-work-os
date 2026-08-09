@@ -11,17 +11,12 @@ from app.services.rag import rag_service
 def _record_task_failure(job_id: str, error: Exception) -> bool:
     current_job = get_current_job()
     if current_job is not None and current_job.retries_left:
-        job_service.update(
-            job_id,
-            status="queued",
-            result={
-                "progress": 0,
-                "message": "Task failed and will be retried.",
-                "error": str(error),
-            },
-        )
+        job_service.retry(job_id, error)
         return True
-    job_service.fail(job_id, error)
+    if current_job is not None:
+        job_service.dead_letter(job_id, error)
+    else:
+        job_service.fail(job_id, error)
     return False
 
 
@@ -36,9 +31,8 @@ def ingest_document_task(
 ) -> dict[str, object]:
     path = Path(staged_path)
     completed = False
-    job_service.update(
+    job_service.start(
         job_id,
-        status="running",
         result={"progress": 10, "message": "Reading uploaded file."},
     )
     try:
@@ -80,9 +74,8 @@ def ingest_document_task(
 def reindex_document_task(
     job_id: str, document_id: str, role: str, organization_id: str = "org_default"
 ) -> dict[str, object]:
-    job_service.update(
+    job_service.start(
         job_id,
-        status="running",
         result={"progress": 20, "message": "Rebuilding searchable chunks."},
     )
     try:
@@ -108,9 +101,8 @@ def ingest_connector_items_task(
     uploaded_by: str,
     organization_id: str = "org_default",
 ) -> dict[str, object]:
-    job_service.update(
+    job_service.start(
         job_id,
-        status="running",
         result={"progress": 5, "message": "Starting connector import."},
     )
     document_ids: list[str] = []

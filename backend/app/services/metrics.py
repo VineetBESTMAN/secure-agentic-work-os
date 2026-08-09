@@ -35,6 +35,27 @@ BACKUP_RPO = Gauge(
     "workos_backup_rpo_seconds",
     "Configured database backup recovery-point objective in seconds.",
 )
+BACKGROUND_JOBS = Gauge(
+    "workos_background_jobs",
+    "Persisted background jobs by terminal or active state.",
+    ("status",),
+)
+STALE_RUNNING_JOBS = Gauge(
+    "workos_stale_running_jobs",
+    "Running jobs whose heartbeat exceeded the configured threshold.",
+)
+PROVIDER_ACCOUNTS_IN_ERROR = Gauge(
+    "workos_provider_accounts_in_error",
+    "Connected provider accounts with a recorded synchronization error.",
+)
+WEBHOOK_DELIVERIES_24H = Gauge(
+    "workos_webhook_deliveries_24h",
+    "Accepted provider webhook deliveries in the previous 24 hours.",
+)
+WEBHOOK_DUPLICATES_24H = Gauge(
+    "workos_webhook_duplicates_24h",
+    "Deduplicated provider webhook replays in the previous 24 hours.",
+)
 
 
 class MetricsService:
@@ -61,6 +82,30 @@ class MetricsService:
         BACKUP_CONFIGURED.set(1 if configured else 0)
         BACKUP_AGE.set(age_seconds if age_seconds is not None else -1)
         BACKUP_RPO.set(rpo_seconds)
+
+    def update_reliability(
+        self,
+        *,
+        queued_jobs: int,
+        running_jobs: int,
+        failed_jobs: int,
+        dead_lettered_jobs: int,
+        stale_running_jobs: int,
+        provider_accounts_in_error: int,
+        webhook_deliveries_24h: int,
+        webhook_duplicates_24h: int,
+    ) -> None:
+        for status, count in {
+            "queued": queued_jobs,
+            "running": running_jobs,
+            "failed": failed_jobs,
+            "dead_lettered": dead_lettered_jobs,
+        }.items():
+            BACKGROUND_JOBS.labels(status=status).set(count)
+        STALE_RUNNING_JOBS.set(stale_running_jobs)
+        PROVIDER_ACCOUNTS_IN_ERROR.set(provider_accounts_in_error)
+        WEBHOOK_DELIVERIES_24H.set(webhook_deliveries_24h)
+        WEBHOOK_DUPLICATES_24H.set(webhook_duplicates_24h)
 
     @staticmethod
     def render() -> bytes:

@@ -123,7 +123,17 @@ class BackgroundTaskService:
                 task,
                 *args,
                 job_id=job.job_id,
-                retry=Retry(max=3),
+                retry=(
+                    Retry(
+                        max=settings.job_max_attempts - 1,
+                        interval=self._retry_intervals(
+                            settings.job_retry_intervals,
+                            settings.job_max_attempts - 1,
+                        ),
+                    )
+                    if settings.job_max_attempts > 1
+                    else None
+                ),
                 result_ttl=86400,
                 failure_ttl=604800,
             )
@@ -133,6 +143,20 @@ class BackgroundTaskService:
                 raise BackgroundQueueError("The background queue is unavailable.") from exc
             task(*args)
         return job_service.get(job.job_id)
+
+    @staticmethod
+    def _retry_intervals(value: str, retry_count: int) -> list[int]:
+        try:
+            parsed = [int(item.strip()) for item in value.split(",") if item.strip()]
+        except ValueError as exc:
+            raise BackgroundQueueError("Job retry intervals must be integers.") from exc
+        if any(item < 0 for item in parsed):
+            raise BackgroundQueueError("Job retry intervals cannot be negative.")
+        if retry_count == 0:
+            return []
+        if not parsed:
+            return [0] * retry_count
+        return [*parsed, *([parsed[-1]] * retry_count)][:retry_count]
 
     def _staging_path(self, job_id: str, filename: str) -> Path:
         return Path(get_settings().upload_dir) / "staging" / f"{job_id}_{filename}"

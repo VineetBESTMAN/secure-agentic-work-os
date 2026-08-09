@@ -22,6 +22,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Versioned encrypted-secret keyrings with tenant-scoped online re-encryption
 - Previewable, confirmed, tenant-scoped retention enforcement with audit evidence
 - Redis/RQ jobs for uploads, re-indexing, and connector imports
+- Bounded job attempts, worker-loss recovery, heartbeat visibility, and durable dead-letter state
 - Constrained LLM or deterministic planning with server-validated MCP tools, scopes, arguments, and approval requirements
 - Isolated OpenClaw service integration with tenant-bound, revocable MCP credentials and narrow tool filters
 - Durable agent workflows with action state, retries, cancellation, approvals, and idempotency
@@ -30,6 +31,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - OAuth authorization-code flows with expiring PKCE state, encrypted tokens, refresh-token rotation, provider revocation, and secure disconnect
 - Incremental Gmail, Calendar, Slack, GitHub, Jira, and Notion synchronization with encrypted cursors and RAG document updates
 - Signed webhook endpoints with replay protection, provider delivery IDs, and pending-sync state
+- Atomic webhook deduplication under concurrent replay load and durable duplicate counters
 - Google Drive browsing and selected-file import into the document library
 - Policy evaluation, job monitoring, approvals, connector sync, webhook setup, and audit visibility in the React UI
 - Persistent RAG, embedding, and MCP runtime telemetry with latency, reliability, and cost summaries
@@ -38,6 +40,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Alembic migrations and automated Docker verification
 - Production HTTPS proxying, managed-service configuration, encrypted object storage, backups, restore verification, metrics, and alerts
 - GitHub Actions checks for tests, migrations, builds, dependency audits, production configuration, image publishing, deployment, and restore verification
+- Scheduled fault, concurrency, large-collection, webhook-load, and isolated database-recovery verification
 
 ## Architecture
 
@@ -142,6 +145,32 @@ All local demo users use the password `demo-password`.
 9. Sign in as `manager@demo.local`, approve the waiting email action, and confirm the result reports `delivery_mode: provider`.
 
 Uploaded content, extracted chunks, workflows, jobs, approvals, and audit records persist across container restarts through Docker volumes.
+
+## Scale and reliability verification
+
+The reliability suite uses synthetic records in the test database. It covers a 250-document retrieval collection, concurrent authenticated reads, transient provider outages, worker termination, atomic webhook replay handling, database reconnection, durable job state, and reliability metrics:
+
+```bash
+cd backend
+python -m pytest tests/test_scale_reliability.py
+```
+
+Run a bounded, authenticated, read-only benchmark against a running local backend:
+
+```bash
+python scripts/reliability/benchmark_api.py \
+  --base-url http://127.0.0.1:8000 \
+  --requests 100 \
+  --concurrency 20
+```
+
+The database recovery drill uses `docker-compose.reliability.yml`, a guarded `secure-work-os-reliability-*` project name, and tmpfs-backed PostgreSQL/Redis containers. It never references the normal Compose project's named volumes:
+
+```bash
+bash scripts/reliability/verify_postgres_recovery.sh
+```
+
+The Production Operations panel and Prometheus expose queued, running, failed, dead-lettered, and stale jobs together with connector errors and webhook delivery/replay counters. Provider retries are limited to read-only synchronization calls with transient status codes; provider-backed external actions are not automatically replayed.
 
 ## Security model
 

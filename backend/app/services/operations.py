@@ -1,21 +1,27 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from redis import Redis
 
 from app.core.config import get_settings
 from app.core.database import get_connection, is_postgres_database
-from app.models.schemas import BackupStatus, OperationalComponent, OperationsStatus
+from app.models.schemas import (
+    BackupStatus,
+    OperationalComponent,
+    OperationsStatus,
+    ReliabilityStatus,
+)
 from app.services.metrics import metrics_service
 from app.services.object_storage import ObjectStorageError, object_storage_service
 
 
 class OperationsService:
-    def status(self) -> OperationsStatus:
+    def status(self, organization_id: str | None = None) -> OperationsStatus:
         settings = get_settings()
         components, readiness = self.readiness()
         backup = self.backup_status()
+        reliability = self.reliability_status(organization_id=organization_id)
         metrics_service.update_backup(
             configured=backup.configured,
             age_seconds=backup.age_seconds,
@@ -34,7 +40,83 @@ class OperationsService:
             ready=all(readiness.values()),
             components=components,
             backup=backup,
+            reliability=reliability,
         )
+
+    def reliability_status(
+        self, organization_id: str | None = None
+    ) -> ReliabilityStatus:
+        settings = get_settings()
+        now = datetime.now(timezone.utc)
+        stale_before = (now - timedelta(seconds=settings.job_stale_seconds)).isoformat()
+        webhook_since = (now - timedelta(hours=24)).isoformat()
+        job_tenant = ""
+        account_tenant = ""
+        webhook_tenant = ""
+        job_params: list[object] = [stale_before]
+        account_params: list[object] = []
+        webhook_params: list[object] = [webhook_since]
+        if organization_id is not None:
+            job_tenant = "WHERE organization_id = ?"
+            account_tenant = "AND organization_id = ?"
+            webhook_tenant = "AND organization_id = ?"
+            job_params.append(organization_id)
+            account_params.append(organization_id)
+            webhook_params.append(organization_id)
+        try:
+            with get_connection() as connection:
+                jobs = connection.execute(
+                    f"""
+                    SELECT
+                        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+                        SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                        SUM(CASE WHEN status = 'dead_lettered' THEN 1 ELSE 0 END) AS dead_lettered,
+                        SUM(CASE WHEN status = 'running'
+                            AND COALESCE(heartbeat_at, updated_at) < ?
+                            THEN 1 ELSE 0 END) AS stale
+                    FROM background_jobs
+                    {job_tenant}
+                    """,
+                    tuple(job_params),
+                ).fetchone()
+                accounts = connection.execute(
+                    f"""
+                    SELECT COUNT(*) AS count
+                    FROM connector_accounts
+                    WHERE status = 'connected' AND last_error IS NOT NULL
+                    {account_tenant}
+                    """,
+                    tuple(account_params),
+                ).fetchone()
+                webhooks = connection.execute(
+                    f"""
+                    SELECT COUNT(*) AS deliveries,
+                           COALESCE(SUM(duplicate_count), 0) AS duplicates
+                    FROM connector_webhook_deliveries
+                    WHERE received_at >= ?
+                    {webhook_tenant}
+                    """,
+                    tuple(webhook_params),
+                ).fetchone()
+            status = ReliabilityStatus(
+                queued_jobs=int(jobs["queued"] or 0),
+                running_jobs=int(jobs["running"] or 0),
+                failed_jobs=int(jobs["failed"] or 0),
+                dead_lettered_jobs=int(jobs["dead_lettered"] or 0),
+                stale_running_jobs=int(jobs["stale"] or 0),
+                provider_accounts_in_error=int(accounts["count"] or 0),
+                webhook_deliveries_24h=int(webhooks["deliveries"] or 0),
+                webhook_duplicates_24h=int(webhooks["duplicates"] or 0),
+                detail="Reliability counters were read from durable runtime state.",
+            )
+            metrics_service.update_reliability(**status.model_dump(exclude={"available", "detail"}))
+            return status
+        except Exception:
+            return ReliabilityStatus(
+                available=False,
+                detail="Reliability counters are unavailable while the database is unreachable.",
+            )
 
     def readiness(self) -> tuple[list[OperationalComponent], dict[str, bool]]:
         settings = get_settings()
