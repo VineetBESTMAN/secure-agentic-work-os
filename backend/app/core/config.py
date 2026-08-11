@@ -312,6 +312,22 @@ class Settings(BaseSettings):
         le=20,
         validation_alias="APP_LLM_PLANNER_MAX_ACTIONS",
     )
+    workflow_engine: Literal["deterministic", "langgraph"] = Field(
+        default="langgraph", validation_alias="APP_WORKFLOW_ENGINE"
+    )
+    langgraph_fallback_enabled: bool = Field(
+        default=True, validation_alias="APP_LANGGRAPH_FALLBACK_ENABLED"
+    )
+    langgraph_sqlite_path: str = Field(
+        default=str(BASE_DIR / "data" / "langgraph-checkpoints.db"),
+        validation_alias="APP_LANGGRAPH_SQLITE_PATH",
+    )
+    langgraph_recursion_limit: int = Field(
+        default=64,
+        ge=8,
+        le=500,
+        validation_alias="APP_LANGGRAPH_RECURSION_LIMIT",
+    )
     default_daily_cost_limit_usd: float = Field(
         default=5.0,
         validation_alias="APP_DEFAULT_DAILY_COST_LIMIT_USD",
