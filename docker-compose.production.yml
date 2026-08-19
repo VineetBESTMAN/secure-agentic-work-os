@@ -50,6 +50,9 @@ x-production-environment: &production-environment
   APP_GROUNDED_ANSWERS_ENABLED: ${APP_GROUNDED_ANSWERS_ENABLED:-true}
   APP_LLM_PLANNER_ENABLED: ${APP_LLM_PLANNER_ENABLED:-false}
   APP_LLM_PLANNER_MAX_ACTIONS: ${APP_LLM_PLANNER_MAX_ACTIONS:-8}
+  APP_WORKFLOW_ENGINE: ${APP_WORKFLOW_ENGINE:-langgraph}
+  APP_LANGGRAPH_FALLBACK_ENABLED: ${APP_LANGGRAPH_FALLBACK_ENABLED:-true}
+  APP_LANGGRAPH_RECURSION_LIMIT: ${APP_LANGGRAPH_RECURSION_LIMIT:-64}
   APP_MODEL_MAX_INPUT_TOKENS: ${APP_MODEL_MAX_INPUT_TOKENS:-16000}
   APP_VECTOR_DIMENSIONS: ${APP_VECTOR_DIMENSIONS:-384}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -77,7 +80,10 @@ services:
     image: ${BACKEND_IMAGE:-ghcr.io/vineetbestman/secure-agentic-work-os-backend}:${APP_IMAGE_TAG:-latest}
     build:
       context: ./backend
-    command: ["python", "-m", "alembic", "upgrade", "head"]
+    command:
+      - sh
+      - -c
+      - python -m alembic upgrade head && python -m app.langgraph_setup
     environment: *production-environment
     secrets: *app-secrets
     <<: *app-security

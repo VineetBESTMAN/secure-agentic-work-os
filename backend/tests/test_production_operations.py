@@ -179,6 +179,7 @@ def test_production_compose_and_restore_verification_are_fail_safe() -> None:
         assert service["read_only"] is True
         assert service["cap_drop"] == ["ALL"]
         assert "no-new-privileges:true" in service["security_opt"]
+    assert "app.langgraph_setup" in " ".join(services["migrate"]["command"])
 
     caddyfile = (REPOSITORY_ROOT / "ops/caddy/Caddyfile").read_text(
         encoding="utf-8"

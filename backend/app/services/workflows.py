@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from app.core.config import get_settings
 from app.core.database import decode_json, encode_json, get_connection
 from app.models.schemas import (
     AgentPlanResponse,
@@ -9,10 +10,12 @@ from app.models.schemas import (
     MCPExecutionRequest,
     UserContext,
     WorkflowActionRecord,
+    WorkflowGraphEvent,
 )
 from app.services.agent import agent_service
 from app.services.approval import approval_service
 from app.services.audit import audit_service
+from app.services.langgraph_workflows import langgraph_workflow_service
 from app.services.mcp_gateway import mcp_gateway_service
 from app.services.users import user_service
 
@@ -69,14 +72,16 @@ class WorkflowService:
         plan = agent_service.build_plan(prompt=prompt, user=user)
         now = self._now()
         workflow_id = f"wf_{uuid4().hex}"
+        orchestration_engine = get_settings().workflow_engine
         with get_connection() as connection:
             connection.execute(
                 """
                 INSERT INTO agent_workflows (
                     workflow_id, prompt, requested_by, status, plan_json,
-                    current_action_index, created_at, updated_at, organization_id
+                    current_action_index, created_at, updated_at, organization_id,
+                    orchestration_engine
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workflow_id,
@@ -88,6 +93,7 @@ class WorkflowService:
                     now,
                     now,
                     user.organization_id,
+                    orchestration_engine,
                 ),
             )
             self._insert_actions(
@@ -103,6 +109,7 @@ class WorkflowService:
                 "planner_mode": plan.planner_mode,
                 "model": plan.model,
                 "validated": plan.validated,
+                "orchestration_engine": orchestration_engine,
             },
             organization_id=user.organization_id,
         )
@@ -180,83 +187,47 @@ class WorkflowService:
             )
             return self._require_workflow(workflow_id)
 
-        self._set_workflow_status(
-            workflow_id,
-            status="running",
-            current_action_index=workflow.current_action_index,
-            last_error=None,
-            mark_started=True,
-        )
+        if workflow.orchestration_engine == "langgraph":
+            try:
+                return langgraph_workflow_service.run(
+                    workflow,
+                    requester,
+                    load_workflow=self._require_workflow,
+                    advance_once=self._advance_workflow_once,
+                )
+            except Exception as exc:
+                audit_service.record(
+                    actor_id=user.user_id,
+                    event_type="agent.workflow_orchestrator_fallback",
+                    detail={
+                        "workflow_id": workflow_id,
+                        "engine": "langgraph",
+                        "error_type": type(exc).__name__,
+                    },
+                    organization_id=user.organization_id,
+                )
+                if not get_settings().langgraph_fallback_enabled:
+                    self._set_workflow_status(
+                        workflow_id,
+                        status="failed",
+                        current_action_index=workflow.current_action_index,
+                        last_error="The workflow orchestrator is unavailable.",
+                    )
+                    return self._require_workflow(workflow_id)
+                return self._run_deterministic(workflow_id, requester)
+
+        return self._run_deterministic(workflow_id, requester)
+
+    def _run_deterministic(
+        self, workflow_id: str, requester: UserContext
+    ) -> AgentWorkflowRecord:
+        workflow = self._require_workflow(workflow_id)
 
         for _ in range(100):
-            workflow = self._require_workflow(workflow_id)
-            actions = workflow.actions
-            next_action = next(
-                (action for action in actions if action.status not in {"completed", "skipped"}),
-                None,
-            )
-            if next_action is None:
-                self._set_workflow_status(
-                    workflow_id,
-                    status="completed",
-                    current_action_index=len(actions),
-                    last_error=None,
-                    mark_completed=True,
-                )
-                return self._require_workflow(workflow_id)
-
-            if next_action.status == "waiting_for_approval":
-                execution = self._execution_for_action(next_action)
-                if execution is None:
-                    self._fail_action(
-                        next_action,
-                        "The approval-bound MCP execution could not be found.",
-                    )
-                else:
-                    next_action = self._sync_action_with_execution(next_action, execution)
-
-            if next_action.status == "pending":
-                next_action = self._execute_pending_action(
-                    workflow,
-                    next_action,
-                    requester,
-                )
-
-            if next_action.status == "completed":
-                self._set_workflow_status(
-                    workflow_id,
-                    status="running",
-                    current_action_index=next_action.sequence + 1,
-                    last_error=None,
-                )
+            workflow = self._advance_workflow_once(workflow_id, requester)
+            if workflow.status == "running":
                 continue
-            if next_action.status == "waiting_for_approval":
-                self._set_workflow_status(
-                    workflow_id,
-                    status="waiting_for_approval",
-                    current_action_index=next_action.sequence,
-                    last_error=None,
-                )
-                return self._require_workflow(workflow_id)
-            if next_action.status == "failed":
-                self._set_workflow_status(
-                    workflow_id,
-                    status="failed",
-                    current_action_index=next_action.sequence,
-                    last_error=next_action.error,
-                )
-                return self._require_workflow(workflow_id)
-            if next_action.status == "blocked":
-                self._set_workflow_status(
-                    workflow_id,
-                    status="blocked",
-                    current_action_index=next_action.sequence,
-                    last_error=next_action.error,
-                )
-                return self._require_workflow(workflow_id)
-            if next_action.status == "cancelled":
-                return self._require_workflow(workflow_id)
-            return self._require_workflow(workflow_id)
+            return workflow
 
         self._set_workflow_status(
             workflow_id,
@@ -264,6 +235,83 @@ class WorkflowService:
             current_action_index=workflow.current_action_index,
             last_error="Workflow exceeded the state transition safety limit.",
         )
+        return self._require_workflow(workflow_id)
+
+    def _advance_workflow_once(
+        self, workflow_id: str, requester: UserContext
+    ) -> AgentWorkflowRecord:
+        workflow = self._require_workflow(workflow_id)
+        if workflow.status in {"completed", "blocked", "failed", "cancelled"}:
+            return workflow
+
+        self._set_workflow_status(
+            workflow_id,
+            status="running",
+            current_action_index=workflow.current_action_index,
+            last_error=None,
+            mark_started=True,
+        )
+        workflow = self._require_workflow(workflow_id)
+        actions = workflow.actions
+        next_action = next(
+            (action for action in actions if action.status not in {"completed", "skipped"}),
+            None,
+        )
+        if next_action is None:
+            self._set_workflow_status(
+                workflow_id,
+                status="completed",
+                current_action_index=len(actions),
+                last_error=None,
+                mark_completed=True,
+            )
+            return self._require_workflow(workflow_id)
+
+        if next_action.status == "waiting_for_approval":
+            execution = self._execution_for_action(next_action)
+            if execution is None:
+                next_action = self._fail_action(
+                    next_action,
+                    "The approval-bound MCP execution could not be found.",
+                )
+            else:
+                next_action = self._sync_action_with_execution(next_action, execution)
+
+        if next_action.status == "pending":
+            next_action = self._execute_pending_action(
+                workflow,
+                next_action,
+                requester,
+            )
+
+        if next_action.status == "completed":
+            self._set_workflow_status(
+                workflow_id,
+                status="running",
+                current_action_index=next_action.sequence + 1,
+                last_error=None,
+            )
+        elif next_action.status == "waiting_for_approval":
+            self._set_workflow_status(
+                workflow_id,
+                status="waiting_for_approval",
+                current_action_index=next_action.sequence,
+                last_error=None,
+            )
+        elif next_action.status == "failed":
+            self._set_workflow_status(
+                workflow_id,
+                status="failed",
+                current_action_index=next_action.sequence,
+                last_error=next_action.error,
+            )
+        elif next_action.status == "blocked":
+            self._set_workflow_status(
+                workflow_id,
+                status="blocked",
+                current_action_index=next_action.sequence,
+                last_error=next_action.error,
+            )
         return self._require_workflow(workflow_id)
 
     def retry_workflow(
@@ -365,10 +413,42 @@ class WorkflowService:
         audit_service.record(
             actor_id=user.user_id,
             event_type="agent.workflow_cancelled",
-        detail={"workflow_id": workflow_id},
+            detail={"workflow_id": workflow_id},
             organization_id=user.organization_id,
         )
+        cancelled = self._require_workflow(workflow_id)
+        if cancelled.orchestration_engine == "langgraph":
+            try:
+                langgraph_workflow_service.checkpoint_terminal(
+                    cancelled,
+                    requester,
+                    load_workflow=self._require_workflow,
+                    advance_once=self._advance_workflow_once,
+                )
+            except Exception as exc:
+                audit_service.record(
+                    actor_id=user.user_id,
+                    event_type="agent.workflow_terminal_checkpoint_failed",
+                    detail={
+                        "workflow_id": workflow_id,
+                        "engine": "langgraph",
+                        "error_type": type(exc).__name__,
+                    },
+                    organization_id=user.organization_id,
+                )
         return self._require_workflow(workflow_id)
+
+    def list_graph_events(
+        self, workflow_id: str, user: UserContext, *, limit: int = 100
+    ) -> list[WorkflowGraphEvent]:
+        workflow = self.get_workflow(workflow_id, user)
+        if workflow is None:
+            raise ValueError("Workflow not found.")
+        return langgraph_workflow_service.list_events(
+            workflow_id,
+            user.organization_id,
+            limit=limit,
+        )
 
     def handle_execution_update(
         self, execution: MCPExecutionRecord
@@ -705,6 +785,14 @@ class WorkflowService:
                 row["workflow_id"], row["organization_id"]
             ),
             current_action_index=int(row["current_action_index"]),
+            orchestration_engine=row["orchestration_engine"],
+            graph_thread_id=row["graph_thread_id"],
+            graph_checkpoint_id=row["graph_checkpoint_id"],
+            graph_step_count=int(row["graph_step_count"]),
+            graph_last_node=row["graph_last_node"],
+            recent_graph_events=langgraph_workflow_service.list_events(
+                row["workflow_id"], row["organization_id"], limit=12
+            ),
             last_error=row["last_error"],
             created_at=self._string_or_none(row["created_at"]),
             updated_at=self._string_or_none(row["updated_at"]),

@@ -819,6 +819,21 @@ class WorkflowActionRecord(BaseModel):
     updated_at: str | None = None
 
 
+class WorkflowGraphEvent(BaseModel):
+    graph_event_id: str
+    organization_id: str
+    workflow_id: str
+    thread_id: str
+    node_name: str
+    status: str
+    step: int
+    current_action_index: int
+    state_hash: str
+    checkpoint_id: str | None = None
+    error: str | None = None
+    created_at: str | None = None
+
+
 class AgentWorkflowRecord(BaseModel):
     workflow_id: str
     organization_id: str
@@ -836,6 +851,12 @@ class AgentWorkflowRecord(BaseModel):
     plan: AgentPlanResponse
     actions: list[WorkflowActionRecord] = Field(default_factory=list)
     current_action_index: int = 0
+    orchestration_engine: Literal["deterministic", "langgraph"] = "deterministic"
+    graph_thread_id: str | None = None
+    graph_checkpoint_id: str | None = None
+    graph_step_count: int = 0
+    graph_last_node: str | None = None
+    recent_graph_events: list[WorkflowGraphEvent] = Field(default_factory=list)
     last_error: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -848,7 +869,12 @@ class RuntimeObservation(BaseModel):
     observation_id: str
     trace_id: str
     operation_type: Literal[
-        "embedding", "rag_query", "model_generation", "agent_plan", "mcp_tool"
+        "embedding",
+        "rag_query",
+        "model_generation",
+        "agent_plan",
+        "mcp_tool",
+        "workflow_orchestration",
     ]
     actor_id: str
     provider: str

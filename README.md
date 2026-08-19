@@ -26,6 +26,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Constrained LLM or deterministic planning with server-validated MCP tools, scopes, arguments, and approval requirements
 - Isolated OpenClaw service integration with tenant-bound, revocable MCP credentials and narrow tool filters
 - Durable agent workflows with action state, retries, cancellation, approvals, and idempotency
+- LangGraph orchestration with durable SQLite/PostgreSQL checkpoints, tenant-bound thread metadata, safe graph event visibility, and deterministic fallback
 - Authenticated MCP tools for document search, task creation, data export, Gmail, Calendar, Slack, GitHub, Jira, and Notion actions
 - Approval records bound to immutable payload hashes with replay protection
 - OAuth authorization-code flows with expiring PKCE state, encrypted tokens, refresh-token rotation, provider revocation, and secure disconnect
@@ -58,6 +59,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Security MCP server exposed through Streamable HTTP
 - Production connector framework with provider-specific OAuth, sync, webhook, revocation, and action adapters
 - Runtime observability ledger and configurable embedding/generation cost budgets
+- LangGraph checkpoints orchestration state only; MCP remains authoritative for tool policy, approvals, execution, idempotency, audit, and telemetry
 - Curated RAG quality evaluation with per-case evidence and latency results
 - Tenant isolation across documents, workflows, MCP, approvals, connectors, jobs, policies, audit, telemetry, budgets, and RAG evaluations
 - Optional OpenClaw Docker overlay with no database, Redis, Docker socket, repository, or host-filesystem access
@@ -145,6 +147,12 @@ All local demo users use the password `demo-password`.
 9. Sign in as `manager@demo.local`, approve the waiting email action, and confirm the result reports `delivery_mode: provider`.
 
 Uploaded content, extracted chunks, workflows, jobs, approvals, and audit records persist across container restarts through Docker volumes.
+
+## LangGraph workflow orchestration
+
+New workflows use LangGraph by default. Local runs store checkpoints in a separate SQLite database, while PostgreSQL deployments use the production checkpoint saver. Existing pre-migration workflows remain on the deterministic engine, and `APP_WORKFLOW_ENGINE=deterministic` disables LangGraph for newly created workflows.
+
+LangGraph never receives raw prompts, connector tokens, secrets, or unrestricted tool access. Its state contains tenant-bound workflow identifiers and transition status only. Approval waits continue to use the Work OS approval ledger, so a resumed graph cannot change approved arguments or bypass the MCP gateway. Set `APP_LANGGRAPH_FALLBACK_ENABLED=false` to fail closed on checkpoint infrastructure errors instead of using the deterministic state-machine fallback.
 
 ## Scale and reliability verification
 

@@ -435,6 +435,22 @@ type AgentWorkflowRecord = {
     error: string | null;
   }[];
   current_action_index: number;
+  orchestration_engine: "deterministic" | "langgraph";
+  graph_thread_id: string | null;
+  graph_checkpoint_id: string | null;
+  graph_step_count: number;
+  graph_last_node: string | null;
+  recent_graph_events: {
+    graph_event_id: string;
+    node_name: string;
+    status: string;
+    step: number;
+    current_action_index: number;
+    state_hash: string;
+    checkpoint_id: string | null;
+    error: string | null;
+    created_at: string | null;
+  }[];
   last_error: string | null;
 };
 
@@ -3239,7 +3255,32 @@ export default function App() {
                     <small>
                       Planner: {workflow.plan.planner_mode} / {workflow.plan.model} | {workflow.plan.validated ? "server validated" : "unvalidated"}
                     </small>
+                    <div className="security-summary">
+                      <span>Engine: {workflow.orchestration_engine}</span>
+                      <span>Graph steps: {workflow.graph_step_count}</span>
+                      <span>Last node: {workflow.graph_last_node || "not started"}</span>
+                      <span>
+                        Checkpoint: {workflow.graph_checkpoint_id ? "durable" : "not applicable"}
+                      </span>
+                    </div>
                     {workflow.plan.fallback_reason && <em>{workflow.plan.fallback_reason}</em>}
+                    {workflow.recent_graph_events.length > 0 && (
+                      <div className="item-list compact">
+                        {workflow.recent_graph_events.slice(0, 4).map((event) => (
+                          <article key={event.graph_event_id} className="item">
+                            <div className="execution-title">
+                              <strong>Graph step {event.step}: {event.node_name}</strong>
+                              <span className={`status-pill status-${event.status}`}>
+                                {event.status.replaceAll("_", " ")}
+                              </span>
+                            </div>
+                            <small>
+                              Action index {event.current_action_index} | state sha256:{event.state_hash.slice(0, 12)}...
+                            </small>
+                          </article>
+                        ))}
+                      </div>
+                    )}
                     <div className="workflow-timeline">
                       {workflow.actions.map((action) => (
                         <div key={action.action_instance_id} className="workflow-action">

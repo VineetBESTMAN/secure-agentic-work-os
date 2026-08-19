@@ -3,7 +3,13 @@ import hashlib
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.security import get_current_user
-from app.models.schemas import AgentPlanRequest, AgentPlanResponse, AgentWorkflowRecord, AgentWorkflowRequest
+from app.models.schemas import (
+    AgentPlanRequest,
+    AgentPlanResponse,
+    AgentWorkflowRecord,
+    AgentWorkflowRequest,
+    WorkflowGraphEvent,
+)
 from app.services.agent import agent_service
 from app.services.audit import audit_service
 from app.services.workflows import workflow_service
@@ -73,6 +79,29 @@ def get_workflow(
             detail="Workflow not found",
         )
     return workflow
+
+
+@router.get(
+    "/workflows/{workflow_id}/graph-events",
+    response_model=list[WorkflowGraphEvent],
+)
+def list_workflow_graph_events(
+    workflow_id: str,
+    limit: int = 100,
+    user=Depends(get_current_user),
+) -> list[WorkflowGraphEvent]:
+    try:
+        return workflow_service.list_graph_events(workflow_id, user, limit=limit)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post("/workflows/{workflow_id}/resume", response_model=AgentWorkflowRecord)
