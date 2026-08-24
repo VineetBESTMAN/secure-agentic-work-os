@@ -11,6 +11,7 @@ os.environ["APP_LANGGRAPH_SQLITE_PATH"] = str(
 )
 os.environ["APP_UPLOAD_DIR"] = str(test_data_dir / "uploads")
 os.environ["APP_OBJECT_STORAGE_BACKEND"] = "local"
+os.environ["APP_LOCAL_EMBEDDING_BACKEND"] = "lexical"
 os.environ["APP_SECRET_KEY"] = "test-only-jwt-secret-with-at-least-32-characters"
 os.environ["APP_ASYNC_JOBS_ENABLED"] = "false"
 os.environ["APP_RATE_LIMIT_ENABLED"] = "false"

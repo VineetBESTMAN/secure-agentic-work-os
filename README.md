@@ -10,7 +10,7 @@ The application runs locally with Docker Compose and supports testing with real 
 - Organizations, invitations, real user onboarding, tenant-scoped memberships, and stronger RBAC
 - Optional per-organization OIDC/SSO with discovery, PKCE, nonce validation, and encrypted client secrets
 - Persistent document uploads for `.txt`, `.md`, `.csv`, `.json`, `.eml`, `.pdf`, and `.docx`
-- Extraction, chunking, embeddings, semantic search, and claim-level grounded RAG answers
+- Structure-aware extraction, local semantic embeddings, hybrid retrieval, answerability gating, and claim-level grounded RAG answers
 - Central model gateway for structured outputs, retries, timeouts, token limits, provider switching, budgets, and telemetry
 - PostgreSQL with `pgvector` and HNSW indexing, plus a SQLite fallback for local development
 - Document inspection, metadata editing, re-indexing, deletion, and unsafe-content review
@@ -55,7 +55,7 @@ The application runs locally with Docker Compose and supports testing with real 
 
 - FastAPI with modular route, service, model, and policy layers
 - SQLAlchemy persistence managed by Alembic migrations
-- Local deterministic embeddings or optional OpenAI embeddings
+- Local FastEmbed/ONNX semantic embeddings or optional OpenAI embeddings, combined with lexical retrieval and reranking
 - Security MCP server exposed through Streamable HTTP
 - Production connector framework with provider-specific OAuth, sync, webhook, revocation, and action adapters
 - Runtime observability ledger and configurable embedding/generation cost budgets
@@ -325,12 +325,16 @@ APP_ASYNC_JOBS_FALLBACK_SYNC=true
 
 ## Embeddings and retrieval
 
-The default deterministic local embedding provider makes upload, search, and citations work without an API key:
+The default local provider runs `BAAI/bge-small-en-v1.5` through FastEmbed and ONNX without an API key. The first use downloads the model into the configured persistent cache:
 
 ```text
 APP_EMBEDDING_PROVIDER=local
+APP_LOCAL_EMBEDDING_BACKEND=fastembed
+APP_LOCAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
 APP_VECTOR_DIMENSIONS=384
 ```
+
+Search combines semantic similarity with BM25-style lexical relevance, query-term coverage, and ordered-term reranking. A calibrated answerability gate removes weak matches before generation. SQLite uses bounded local scanning with FTS5 for larger collections; production PostgreSQL uses pgvector/HNSW candidates plus a GIN-indexed full-text search path. The deterministic fallback returns an explicit insufficient-evidence response when no relevant sentence exists.
 
 OpenAI embeddings can be enabled through environment variables:
 
@@ -341,11 +345,13 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 APP_VECTOR_DIMENSIONS=384
 ```
 
-The configured OpenAI model receives a request for 384 output dimensions to match the pgvector schema. Re-index uploaded documents after changing the embedding provider or vector dimensions.
+The configured OpenAI model receives a request for 384 output dimensions to match the pgvector schema. Re-index uploaded documents after changing the embedding provider, local model, or vector dimensions. Legacy chunks remain lexically searchable until they are re-indexed.
 
 ## Grounded answers, model gateway, and constrained planning
 
-Retrieved passages can be turned into natural answers through the central model gateway. The answer schema requires every factual claim to cite a retrieved chunk ID and include an exact supporting quote; the server rejects unknown IDs or quotes absent from the cited passage before rendering numbered markers. Retrieved document content is treated as untrusted data. If model access is disabled, unavailable, over budget, or returns invalid grounding, an extractive deterministic answer is returned instead.
+Retrieved passages can be turned into natural answers through the central model gateway. The answer schema requires every factual claim to cite a retrieved chunk ID and include an exact supporting quote; the server rejects unknown IDs, absent quotes, unsupported claims, and claims unrelated to the question before rendering numbered markers. Only citations actually used by the answer are returned. Retrieved document content is treated as untrusted data. If model access is disabled, unavailable, over budget, or returns invalid grounding, a relevance-gated extractive answer is returned instead.
+
+Answers expose `answerable`, `confidence`, retrieval component scores, and section/page locators. Low-confidence searches block dependent workflow actions instead of carrying irrelevant text into tasks or external actions. Query audit events store a SHA-256 fingerprint and length by default; raw query retention requires the explicit `APP_RAG_AUDIT_QUERY_CONTENT=true` setting.
 
 The same gateway provides structured outputs, explicit provider/model selection, request timeouts, bounded retries, output-token limits, cost preflight, and runtime telemetry. OpenAI Responses requests set `store=false`. Deterministic mode remains the default and requires no API key:
 
@@ -378,10 +384,11 @@ Admins and managers can create persistent evaluation datasets from accessible, p
 
 The RAG Quality Evaluation dashboard runs the same dataset against local and OpenAI embeddings without re-indexing or modifying stored documents. Each provider run records:
 
-- retrieval accuracy from expected evidence recall
-- citation correctness from the precision of returned citations
-- groundedness from expected facts supported by retrieved excerpts
-- a hallucination proxy that flags unsupported citations and citations on unanswerable cases
+- retrieval accuracy from exact evidence and expected-fact recall
+- citation correctness from citations that both match expected evidence and support expected facts
+- groundedness of the generated answer against the citations it actually uses
+- final-answer correctness against expected facts and the reference answer
+- hallucination detection for produced answers that are unsupported, irrelevant, or incorrectly cited
 - average, P95, and corpus-index embedding latency
 
 OpenAI comparisons use the configured model and cost-budget enforcement. If `OPENAI_API_KEY` is absent, the OpenAI run is persisted as `skipped` while the local run still completes. Evaluation corpora are bounded by `APP_RAG_EVALUATION_MAX_CHUNKS`, which defaults to 500.

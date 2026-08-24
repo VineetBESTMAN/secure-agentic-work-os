@@ -54,8 +54,23 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
             row[1]
             for row in connection.execute("PRAGMA table_info(connector_accounts)").fetchall()
         }
+        chunk_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(document_chunks)").fetchall()
+        }
+        evaluation_result_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(rag_evaluation_results)"
+            ).fetchall()
+        }
     assert "last_refresh_at" in connector_columns
-    assert revision == ("20260809_0013",)
+    assert {"heading", "locator", "content_hash", "embedding_model"} <= chunk_columns
+    assert {"answer", "answerable", "confidence", "answer_correctness"} <= (
+        evaluation_result_columns
+    )
+    assert "document_chunks_fts" in tables
+    assert revision == ("20260821_0014",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -70,7 +85,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert revision == ("20260809_0013",)
+        assert revision == ("20260821_0014",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -187,7 +202,7 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         )
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260809_0013",)
+    assert revision == ("20260821_0014",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
@@ -246,7 +261,7 @@ def test_object_storage_migration_backfills_existing_documents(tmp_path: Path) -
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
 
     assert storage == ("local", "doc_existing_existing.txt")
-    assert revision == ("20260809_0013",)
+    assert revision == ("20260821_0014",)
 
 
 def test_reliability_migration_preserves_existing_job_state(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.core.config import get_settings
 from app.models.schemas import Citation, RagAnswer
 from app.services.model_gateway import model_gateway_service
+from app.services.retrieval import retrieval_terms, term_coverage
 
 
 class GroundedSupport(BaseModel):
@@ -41,12 +42,17 @@ class GroundedAnswerService:
         citations: list[Citation],
         actor_id: str,
         organization_id: str,
+        force_deterministic: bool = False,
     ) -> RagAnswer:
         evidence = [citation for citation in citations if citation.chunk_id]
         if not evidence:
             return RagAnswer(
                 answer="I could not find a relevant passage in your accessible documents.",
                 citations=[],
+                grounded=False,
+                answerable=False,
+                confidence=0.0,
+                retrieval_mode="none",
             )
 
         evidence_by_id = {
@@ -87,9 +93,9 @@ class GroundedAnswerService:
             fallback_model="evidence-extractive-v1",
             actor_id=actor_id,
             organization_id=organization_id,
-            enabled=settings.grounded_answers_enabled,
+            enabled=settings.grounded_answers_enabled and not force_deterministic,
             validate_output=lambda output: self._validate_citations(
-                output, evidence_by_id
+                output, evidence_by_id, question
             ),
         )
 
@@ -99,14 +105,29 @@ class GroundedAnswerService:
                 citations=[],
                 generation_mode=result.mode,
                 model=result.model,
-                grounded=True,
+                grounded=False,
+                answerable=False,
+                confidence=0.0,
+                retrieval_mode="none",
                 fallback_reason=result.fallback_reason,
             )
 
         citation_by_id = {
             citation.chunk_id: citation for citation in evidence if citation.chunk_id
         }
-        citation_order = list(citation_by_id)
+        referenced_ids = list(
+            dict.fromkeys(
+                support.citation_id
+                for claim in result.output.claims
+                for support in claim.supports
+            )
+        )
+        used_citations = [
+            citation_by_id[citation_id]
+            for citation_id in referenced_ids
+            if citation_id in citation_by_id
+        ]
+        citation_order = [citation.chunk_id for citation in used_citations]
         rendered_claims: list[str] = []
         for claim in result.output.claims:
             claim_ids = list(
@@ -120,17 +141,23 @@ class GroundedAnswerService:
 
         return RagAnswer(
             answer=" ".join(rendered_claims),
-            citations=evidence,
+            citations=used_citations,
             generation_mode=result.mode,
             model=result.model,
             grounded=True,
+            answerable=True,
+            confidence=self._confidence(question, rendered_claims, used_citations),
+            retrieval_mode="hybrid",
             fallback_reason=result.fallback_reason,
         )
 
     @staticmethod
     def _validate_citations(
-        output: GroundedGeneration, evidence_by_id: dict[str, str]
+        output: GroundedGeneration,
+        evidence_by_id: dict[str, str],
+        question: str,
     ) -> None:
+        settings = get_settings()
         for claim in output.claims:
             if not claim.text.strip():
                 raise ValueError("Grounded claims cannot be empty.")
@@ -144,31 +171,63 @@ class GroundedAnswerService:
                     raise ValueError(
                         "Every claim support quote must occur in its cited evidence."
                     )
+                claim_terms = set(retrieval_terms(claim.text))
+                quote_terms = set(retrieval_terms(support.quote))
+                if claim_terms and len(claim_terms & quote_terms) / len(claim_terms) < 0.2:
+                    raise ValueError("Every claim must be substantively supported by its quote.")
+            supporting_text = " ".join(
+                [claim.text, *(support.quote for support in claim.supports)]
+            )
+            if (
+                term_coverage(question, supporting_text)
+                < settings.rag_minimum_term_coverage
+            ):
+                raise ValueError("Every claim must be relevant to the user's question.")
 
     def _extractive_fallback(
         self, question: str, citations: list[Citation]
     ) -> GroundedGeneration:
-        question_terms = set(self._terms(question))
-        candidates: list[tuple[int, int, str, str]] = []
+        settings = get_settings()
+        candidates: list[tuple[float, float, int, str, str]] = []
         for citation_index, citation in enumerate(citations):
             if citation.chunk_id is None:
                 continue
-            sentences = re.split(r"(?<=[.!?])\s+", citation.excerpt)
+            sentences = re.split(r"(?<=[.!?])\s+|\n+", citation.excerpt)
             for sentence_index, sentence in enumerate(sentences):
                 cleaned = sentence.strip()
                 if not cleaned:
                     continue
-                score = len(question_terms.intersection(self._terms(cleaned)))
-                candidates.append(
-                    (score, -citation_index, cleaned, citation.chunk_id)
+                relevance = term_coverage(
+                    question,
+                    " ".join(
+                        part
+                        for part in (citation.title, citation.heading, cleaned)
+                        if part
+                    ),
                 )
-                if sentence_index >= 4:
+                citation_score = citation.score if citation.score is not None else 1.0
+                candidates.append(
+                    (
+                        relevance,
+                        citation_score,
+                        -citation_index,
+                        cleaned,
+                        citation.chunk_id,
+                    )
+                )
+                if sentence_index >= 39:
                     break
         if not candidates:
             return GroundedGeneration(insufficient_evidence=True)
 
         candidates.sort(reverse=True)
-        _, _, sentence, chunk_id = candidates[0]
+        relevance, citation_score, _, sentence, chunk_id = candidates[0]
+        citation = next(item for item in citations if item.chunk_id == chunk_id)
+        if (
+            citation_score < settings.rag_minimum_score
+            or relevance < settings.rag_minimum_term_coverage
+        ):
+            return GroundedGeneration(insufficient_evidence=True)
         return GroundedGeneration(
             claims=[
                 GroundedClaim(
@@ -181,8 +240,14 @@ class GroundedAnswerService:
         )
 
     @staticmethod
-    def _terms(text: str) -> list[str]:
-        return re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}", text.lower())
+    def _confidence(
+        question: str, claims: list[str], citations: list[Citation]
+    ) -> float:
+        if not citations:
+            return 0.0
+        retrieval_confidence = max(citation.score or 0.0 for citation in citations)
+        relevance = term_coverage(question, " ".join(claims))
+        return round(min(1.0, 0.72 * retrieval_confidence + 0.28 * relevance), 3)
 
 
 grounded_answer_service = GroundedAnswerService()

@@ -247,6 +247,23 @@ class Settings(BaseSettings):
     )
     vector_dimensions: int = Field(default=384, validation_alias="APP_VECTOR_DIMENSIONS")
     embedding_provider: str = Field(default="local", validation_alias="APP_EMBEDDING_PROVIDER")
+    local_embedding_backend: Literal["fastembed", "lexical"] = Field(
+        default="fastembed", validation_alias="APP_LOCAL_EMBEDDING_BACKEND"
+    )
+    local_embedding_model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        validation_alias="APP_LOCAL_EMBEDDING_MODEL",
+    )
+    local_embedding_cache_dir: str = Field(
+        default=str(BASE_DIR / "data" / "fastembed-cache"),
+        validation_alias="APP_LOCAL_EMBEDDING_CACHE_DIR",
+    )
+    local_embedding_threads: int | None = Field(
+        default=None,
+        ge=1,
+        le=64,
+        validation_alias="APP_LOCAL_EMBEDDING_THREADS",
+    )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_embedding_model: str = Field(
         default="text-embedding-3-small",
@@ -337,6 +354,46 @@ class Settings(BaseSettings):
         ge=1,
         le=10_000,
         validation_alias="APP_RAG_EVALUATION_MAX_CHUNKS",
+    )
+    rag_candidate_limit: int = Field(
+        default=30,
+        ge=3,
+        le=200,
+        validation_alias="APP_RAG_CANDIDATE_LIMIT",
+    )
+    rag_top_k: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias="APP_RAG_TOP_K",
+    )
+    rag_minimum_score: float = Field(
+        default=0.38,
+        ge=0.0,
+        le=1.0,
+        validation_alias="APP_RAG_MINIMUM_SCORE",
+    )
+    rag_minimum_dense_score: float = Field(
+        default=0.68,
+        ge=0.0,
+        le=1.0,
+        validation_alias="APP_RAG_MINIMUM_DENSE_SCORE",
+    )
+    rag_minimum_term_coverage: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        validation_alias="APP_RAG_MINIMUM_TERM_COVERAGE",
+    )
+    rag_sqlite_dense_scan_limit: int = Field(
+        default=5_000,
+        ge=100,
+        le=100_000,
+        validation_alias="APP_RAG_SQLITE_DENSE_SCAN_LIMIT",
+    )
+    rag_audit_query_content: bool = Field(
+        default=False,
+        validation_alias="APP_RAG_AUDIT_QUERY_CONTENT",
     )
     oauth_redirect_base_url: str = Field(
         default="http://127.0.0.1:8000/api/connectors",

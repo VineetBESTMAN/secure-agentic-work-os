@@ -1,3 +1,5 @@
+from hashlib import sha256
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.core.config import get_settings
@@ -140,14 +142,20 @@ def query_documents(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    audit_detail: dict[str, object] = {
+        "question_hash": sha256(payload.question.encode("utf-8")).hexdigest(),
+        "question_length": len(payload.question),
+        "role": user.role,
+        "flagged": scan.flagged,
+        "answerable": answer.answerable,
+        "confidence": answer.confidence,
+    }
+    if get_settings().rag_audit_query_content:
+        audit_detail["question"] = payload.question
     audit_service.record(
         actor_id=user.user_id,
         event_type="documents.query",
-        detail={
-            "question": payload.question,
-            "role": user.role,
-            "flagged": scan.flagged,
-        },
+        detail=audit_detail,
         organization_id=user.organization_id,
     )
     return answer

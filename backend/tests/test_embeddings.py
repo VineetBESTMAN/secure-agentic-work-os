@@ -62,3 +62,51 @@ def test_openai_embeddings_use_configured_model_and_dimensions(monkeypatch) -> N
         "dimensions": 4,
     }
     assert vectors == [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]]
+
+
+def test_fastembed_uses_query_and_passage_encoders(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, list[str]]] = []
+
+    class FakeArray(list):
+        def tolist(self):
+            return list(self)
+
+    class FakeTextEmbedding:
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["model_name"] == "test-semantic-model"
+            assert kwargs["cache_dir"] == str(tmp_path)
+
+        @staticmethod
+        def get_embedding_size(model_name: str) -> int:
+            assert model_name == "test-semantic-model"
+            return 4
+
+        def query_embed(self, texts):
+            materialized = list(texts)
+            calls.append(("query", materialized))
+            return iter([FakeArray([1.0, 0.0, 0.0, 0.0]) for _ in materialized])
+
+        def passage_embed(self, texts):
+            materialized = list(texts)
+            calls.append(("document", materialized))
+            return iter([FakeArray([0.0, 1.0, 0.0, 0.0]) for _ in materialized])
+
+    monkeypatch.setattr("app.services.embeddings.TextEmbedding", FakeTextEmbedding)
+    monkeypatch.setenv("APP_LOCAL_EMBEDDING_BACKEND", "fastembed")
+    monkeypatch.setenv("APP_LOCAL_EMBEDDING_MODEL", "test-semantic-model")
+    monkeypatch.setenv("APP_LOCAL_EMBEDDING_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_VECTOR_DIMENSIONS", "4")
+    get_settings.cache_clear()
+    try:
+        service = EmbeddingService()
+        query = service.embed("approval question", input_type="query")
+        document = service.embed("approval policy", input_type="document")
+    finally:
+        get_settings.cache_clear()
+
+    assert query == [1.0, 0.0, 0.0, 0.0]
+    assert document == [0.0, 1.0, 0.0, 0.0]
+    assert calls == [
+        ("query", ["approval question"]),
+        ("document", ["approval policy"]),
+    ]

@@ -6,6 +6,7 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app.core.config import get_settings
@@ -33,6 +34,11 @@ class WorkOSJWTVerifier:
 
 
 settings = get_settings()
+
+# MCP's generic lifespan annotation is forward-referenced. Rebuild it before
+# pydantic-settings inspects defaults so newer Pydantic releases do not treat
+# the otherwise valid field definition as incomplete.
+FastMCPSettings.model_rebuild()
 
 
 def _transport_security_settings() -> TransportSecuritySettings:

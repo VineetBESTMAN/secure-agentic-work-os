@@ -1,13 +1,8 @@
 import math
 import re
 import time
-import zipfile
-from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
-from xml.etree import ElementTree
-
-from pypdf import PdfReader
 
 from app.core.config import get_settings
 from app.core.database import (
@@ -26,11 +21,18 @@ from app.models.schemas import (
     RagAnswer,
 )
 from app.services.embeddings import embedding_service
+from app.services.document_parsing import (
+    PreparedChunk,
+    chunk_sections,
+    extract_sections,
+    joined_text,
+)
 from app.services.grounded_answers import grounded_answer_service
 from app.services.observability import observability_service
 from app.services.object_storage import ObjectStorageError, object_storage_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
+from app.services.retrieval import RankedMatch, hybrid_retrieval_service, retrieval_terms
 from app.services.security_controls import security_control_service
 
 STOP_WORDS = {
@@ -84,20 +86,11 @@ def _summary(text: str, limit: int = 280) -> str:
     return cleaned[:limit].rsplit(" ", 1)[0] + "..."
 
 
-def _chunk_text(text: str, chunk_size: int = 220, overlap: int = 40) -> list[str]:
-    words = _clean_text(text).split()
-    if not words:
-        return []
-
-    chunks: list[str] = []
-    step = max(1, chunk_size - overlap)
-    for start in range(0, len(words), step):
-        chunk = " ".join(words[start : start + chunk_size])
-        if chunk:
-            chunks.append(chunk)
-        if start + chunk_size >= len(words):
-            break
-    return chunks
+def _citation_excerpt(text: str, limit: int = 3_000) -> str:
+    cleaned = "\n".join(line.rstrip() for line in text.strip().splitlines())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rsplit(" ", 1)[0] + "..."
 
 
 def _delete_storage_safely(key: str, *, backend: str) -> None:
@@ -106,41 +99,6 @@ def _delete_storage_safely(key: str, *, backend: str) -> None:
         object_storage_service.delete(key, backend=backend)
     except ObjectStorageError:
         pass
-
-
-def _extract_docx(data: bytes) -> str:
-    with zipfile.ZipFile(BytesIO(data)) as archive:
-        xml = archive.read("word/document.xml")
-    root = ElementTree.fromstring(xml)
-    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    paragraphs = []
-    for paragraph in root.findall(".//w:p", namespace):
-        parts = [
-            node.text or ""
-            for node in paragraph.findall(".//w:t", namespace)
-            if node.text
-        ]
-        if parts:
-            paragraphs.append("".join(parts))
-    return "\n".join(paragraphs)
-
-
-def _extract_pdf(data: bytes) -> str:
-    reader = PdfReader(BytesIO(data))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
-
-
-def _extract_text(filename: str, data: bytes) -> str:
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        return _extract_pdf(data)
-    if suffix == ".docx":
-        return _extract_docx(data)
-    if suffix in {".txt", ".md", ".csv", ".json", ".log", ".eml"}:
-        return data.decode("utf-8", errors="replace")
-    raise ValueError(
-        "Unsupported file type. Upload .txt, .md, .csv, .json, .eml, .pdf, or .docx."
-    )
 
 
 def _row_to_document(row) -> DocumentRecord:
@@ -180,8 +138,8 @@ class RagService:
             except ValueError:
                 pass
 
-        text = _extract_text(filename=filename, data=data)
-        cleaned = _clean_text(text)
+        sections = extract_sections(filename=filename, data=data)
+        cleaned = _clean_text(joined_text(sections))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
         security_inspection = security_control_service.inspect_upload(
@@ -192,9 +150,14 @@ class RagService:
             organization_id=organization_id,
         )
 
-        chunks = _chunk_text(cleaned)
+        chunks = chunk_sections(sections)
         if not chunks:
             raise ValueError("No searchable chunks could be created from this file.")
+
+        with observability_service.context(
+            uploaded_by, organization_id=organization_id
+        ):
+            indexed_chunks = self._prepare_chunks(chunks)
 
         document_id = document_id or f"doc_{uuid4().hex}"
         safe_filename = Path(filename).name or "uploaded-document.txt"
@@ -241,15 +204,12 @@ class RagService:
                         storage_key,
                     ),
                 )
-                with observability_service.context(
-                    uploaded_by, organization_id=organization_id
-                ):
-                    self._insert_chunks(
-                        connection,
-                        document_id=document_id,
-                        chunks=chunks,
-                        organization_id=organization_id,
-                    )
+                self._insert_chunks(
+                    connection,
+                    document_id=document_id,
+                    indexed_chunks=indexed_chunks,
+                    organization_id=organization_id,
+                )
         except Exception:
             _delete_storage_safely(storage_key, backend=storage_backend)
             raise
@@ -294,7 +254,8 @@ class RagService:
         existing = self.get_document(
             document_id=document_id, organization_id=organization_id
         )
-        cleaned = _clean_text(_extract_text(filename=filename, data=data))
+        sections = extract_sections(filename=filename, data=data)
+        cleaned = _clean_text(joined_text(sections))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
         security_inspection = security_control_service.inspect_upload(
@@ -304,9 +265,13 @@ class RagService:
             actor_id=uploaded_by,
             organization_id=organization_id,
         )
-        chunks = _chunk_text(cleaned)
+        chunks = chunk_sections(sections)
         if not chunks:
             raise ValueError("No searchable chunks could be created from this file.")
+        with observability_service.context(
+            uploaded_by, organization_id=organization_id
+        ):
+            indexed_chunks = self._prepare_chunks(chunks)
 
         safe_filename = Path(filename).name or "connector-item.txt"
         new_key = object_storage_service.document_key(
@@ -359,15 +324,12 @@ class RagService:
                         organization_id,
                     ),
                 )
-                with observability_service.context(
-                    uploaded_by, organization_id=organization_id
-                ):
-                    self._insert_chunks(
-                        connection,
-                        document_id=document_id,
-                        chunks=chunks,
-                        organization_id=organization_id,
-                    )
+                self._insert_chunks(
+                    connection,
+                    document_id=document_id,
+                    indexed_chunks=indexed_chunks,
+                    organization_id=organization_id,
+                )
         except Exception:
             _delete_storage_safely(new_key, backend=new_backend)
             raise
@@ -409,7 +371,7 @@ class RagService:
         with get_connection() as connection:
             rows = connection.execute(
                 """
-                SELECT chunk_id, chunk_index, text
+                SELECT chunk_id, chunk_index, text, heading, locator, token_count
                 FROM document_chunks
                 WHERE document_id = ? AND organization_id = ?
                 ORDER BY chunk_index ASC
@@ -424,6 +386,9 @@ class RagService:
                     chunk_id=row["chunk_id"],
                     chunk_index=row["chunk_index"],
                     text=row["text"],
+                    heading=row["heading"],
+                    locator=row["locator"],
+                    token_count=int(row["token_count"]),
                 )
                 for row in rows
             ],
@@ -527,7 +492,8 @@ class RagService:
             raise ValueError(
                 "The original uploaded file is missing from object storage."
             ) from exc
-        cleaned = _clean_text(_extract_text(filename=document.filename, data=file_data))
+        sections = extract_sections(filename=document.filename, data=file_data)
+        cleaned = _clean_text(joined_text(sections))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
         security_inspection = security_control_service.inspect_upload(
@@ -538,9 +504,13 @@ class RagService:
             organization_id=organization_id,
         )
 
-        chunks = _chunk_text(cleaned)
+        chunks = chunk_sections(sections)
         if not chunks:
             raise ValueError("No searchable chunks could be created from this file.")
+        with observability_service.context(
+            document.document_id, organization_id=organization_id
+        ):
+            indexed_chunks = self._prepare_chunks(chunks)
 
         scan = prompt_guard_service.scan_text(cleaned[:20_000])
         unsafe_reasons = list(
@@ -565,15 +535,12 @@ class RagService:
                     organization_id,
                 ),
             )
-            with observability_service.context(
-                document.document_id, organization_id=organization_id
-            ):
-                self._insert_chunks(
-                    connection,
-                    document_id=document_id,
-                    chunks=chunks,
-                    organization_id=organization_id,
-                )
+            self._insert_chunks(
+                connection,
+                document_id=document_id,
+                indexed_chunks=indexed_chunks,
+                organization_id=organization_id,
+            )
         return self.get_document(document_id=document_id, organization_id=organization_id)
 
     def can_access_document(
@@ -603,11 +570,21 @@ class RagService:
             organization_id=organization_id,
         ) as trace_id:
             try:
-                query_embedding = embedding_service.embed(question)
+                query_embedding = embedding_service.embed(
+                    question, input_type="query"
+                )
                 if not any(query_embedding):
-                    answer = RagAnswer(answer="Ask a more specific question.", citations=[])
+                    answer = RagAnswer(
+                        answer="Ask a more specific question.",
+                        citations=[],
+                        grounded=False,
+                        answerable=False,
+                        confidence=0.0,
+                        retrieval_mode="none",
+                    )
                 else:
-                    top_matches = self._vector_matches(
+                    top_matches = self._hybrid_matches(
+                        question=question,
                         query_embedding=query_embedding,
                         role=role,
                         organization_id=organization_id,
@@ -619,11 +596,15 @@ class RagService:
                                 "documents."
                             ),
                             citations=[],
+                            grounded=False,
+                            answerable=False,
+                            confidence=0.0,
+                            retrieval_mode="none",
                         )
                     else:
                         citations = [
-                            self._match_to_citation(score=score, row=row)
-                            for score, row in top_matches
+                            self._match_to_citation(match)
+                            for match in top_matches
                         ]
                         answer = grounded_answer_service.generate(
                             question=question,
@@ -635,7 +616,7 @@ class RagService:
                 observability_service.record_safely(
                     operation_type="rag_query",
                     provider="retrieval",
-                    model="semantic-search",
+                    model="hybrid-search-v2",
                     status="failed",
                     latency_ms=(time.perf_counter() - started) * 1_000,
                     input_units=max(1, math.ceil(len(question) / 4)),
@@ -647,7 +628,7 @@ class RagService:
             observability_service.record_safely(
                 operation_type="rag_query",
                 provider="retrieval",
-                model="semantic-search",
+                model="hybrid-search-v2",
                 status="completed",
                 latency_ms=(time.perf_counter() - started) * 1_000,
                 input_units=max(1, math.ceil(len(question) / 4)),
@@ -657,36 +638,56 @@ class RagService:
                     "citation_count": len(answer.citations),
                     "generation_mode": answer.generation_mode,
                     "grounded": answer.grounded,
+                    "answerable": answer.answerable,
+                    "confidence": answer.confidence,
                 },
                 trace_id=trace_id,
             )
             return answer
 
+    def _prepare_chunks(
+        self, chunks: list[PreparedChunk]
+    ) -> list[tuple[str, int, PreparedChunk, list[float], str]]:
+        embeddings = embedding_service.embed_many(
+            [chunk.embedding_text for chunk in chunks],
+            input_type="document",
+        )
+        model = embedding_service.model_for_provider(get_settings().embedding_provider)
+        return [
+            (f"chk_{uuid4().hex}", index, chunk, embeddings[index], model)
+            for index, chunk in enumerate(chunks)
+        ]
+
     def _insert_chunks(
         self,
         connection,
         document_id: str,
-        chunks: list[str],
+        indexed_chunks: list[tuple[str, int, PreparedChunk, list[float], str]],
         organization_id: str = "org_default",
     ) -> None:
-        embeddings = embedding_service.embed_many(chunks)
         if is_postgres_database():
             connection.executemany(
                 """
                 INSERT INTO document_chunks (
-                    chunk_id, document_id, chunk_index, text, embedding, organization_id
-                ) VALUES (?, ?, ?, ?, ?::vector, ?)
+                    chunk_id, document_id, chunk_index, text, embedding, organization_id,
+                    heading, locator, token_count, content_hash, embedding_model
+                ) VALUES (?, ?, ?, ?, ?::vector, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
-                        f"chk_{uuid4().hex}",
+                        chunk_id,
                         document_id,
                         index,
-                        chunk,
-                        vector_literal(embeddings[index]),
+                        chunk.text,
+                        vector_literal(embedding),
                         organization_id,
+                        chunk.heading,
+                        chunk.locator,
+                        chunk.token_count,
+                        chunk.content_hash,
+                        model,
                     )
-                    for index, chunk in enumerate(chunks)
+                    for chunk_id, index, chunk, embedding, model in indexed_chunks
                 ],
             )
             return
@@ -694,101 +695,214 @@ class RagService:
         connection.executemany(
             """
             INSERT INTO document_chunks (
-                chunk_id, document_id, chunk_index, text, embedding_json, organization_id
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                chunk_id, document_id, chunk_index, text, embedding_json, organization_id,
+                heading, locator, token_count, content_hash, embedding_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
-                    f"chk_{uuid4().hex}",
+                    chunk_id,
                     document_id,
                     index,
-                    chunk,
-                    encode_json(embeddings[index]),
+                    chunk.text,
+                    encode_json(embedding),
                     organization_id,
+                    chunk.heading,
+                    chunk.locator,
+                    chunk.token_count,
+                    chunk.content_hash,
+                    model,
                 )
-                for index, chunk in enumerate(chunks)
+                for chunk_id, index, chunk, embedding, model in indexed_chunks
             ],
         )
 
-    def _vector_matches(
-        self, query_embedding: list[float], role: str, organization_id: str
-    ):
+    def _hybrid_matches(
+        self,
+        question: str,
+        query_embedding: list[float],
+        role: str,
+        organization_id: str,
+    ) -> list[RankedMatch]:
         if is_postgres_database():
-            return self._postgres_vector_matches(
-                query_embedding=query_embedding, role=role, organization_id=organization_id
+            return self._postgres_hybrid_matches(
+                question=question,
+                query_embedding=query_embedding,
+                role=role,
+                organization_id=organization_id,
             )
-        return self._sqlite_vector_matches(
-            query_embedding=query_embedding, role=role, organization_id=organization_id
+        return self._sqlite_hybrid_matches(
+            question=question,
+            query_embedding=query_embedding,
+            role=role,
+            organization_id=organization_id,
         )
 
-    def _postgres_vector_matches(
-        self, query_embedding: list[float], role: str, organization_id: str
-    ):
-        where = ["d.unsafe = FALSE", "c.embedding IS NOT NULL", "d.organization_id = ?"]
+    def _postgres_hybrid_matches(
+        self,
+        question: str,
+        query_embedding: list[float],
+        role: str,
+        organization_id: str,
+    ) -> list[RankedMatch]:
+        where = ["d.unsafe = FALSE", "d.organization_id = ?"]
         params: list[str] = [organization_id]
         if role != "admin":
             where.append("d.classification != ?")
             params.append("restricted")
 
         embedding = vector_literal(query_embedding)
+        candidate_limit = get_settings().rag_candidate_limit
+        current_model = embedding_service.model_for_provider(
+            get_settings().embedding_provider
+        )
         with get_connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT
-                    c.chunk_id,
-                    c.text,
-                    d.document_id,
-                    d.title,
-                    1 - (c.embedding <=> ?::vector) AS score
-                FROM document_chunks c
-                JOIN documents d ON d.document_id = c.document_id
-                WHERE {' AND '.join(where)}
-                ORDER BY c.embedding <=> ?::vector
-                LIMIT 3
+                WITH dense AS (
+                    SELECT c.chunk_id, c.text, c.heading, c.locator,
+                           d.document_id, d.title, d.created_at,
+                           1 - (c.embedding <=> ?::vector) AS dense_score,
+                           0.0 AS lexical_score
+                    FROM document_chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE {' AND '.join(where)}
+                      AND c.embedding IS NOT NULL AND c.embedding_model = ?
+                    ORDER BY c.embedding <=> ?::vector
+                    LIMIT ?
+                ), lexical AS (
+                    SELECT c.chunk_id, c.text, c.heading, c.locator,
+                           d.document_id, d.title, d.created_at,
+                           0.0 AS dense_score,
+                           ts_rank_cd(
+                               to_tsvector('english', coalesce(c.heading, '') || ' ' || c.text),
+                               plainto_tsquery('english', ?)
+                           ) AS lexical_score
+                    FROM document_chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE {' AND '.join(where)}
+                      AND to_tsvector(
+                          'english', coalesce(c.heading, '') || ' ' || c.text
+                      ) @@ plainto_tsquery('english', ?)
+                    ORDER BY lexical_score DESC
+                    LIMIT ?
+                )
+                SELECT * FROM dense
+                UNION ALL
+                SELECT * FROM lexical
                 """,
-                (embedding, *params, embedding),
+                (
+                    embedding,
+                    *params,
+                    current_model,
+                    embedding,
+                    candidate_limit,
+                    question,
+                    *params,
+                    question,
+                    candidate_limit,
+                ),
             ).fetchall()
-        return [(float(row["score"]), row) for row in rows if float(row["score"]) > 0]
+        candidates: dict[str, dict[str, object]] = {}
+        dense_scores: dict[str, float] = {}
+        lexical_scores: dict[str, float] = {}
+        for row in rows:
+            chunk_id = str(row["chunk_id"])
+            candidates[chunk_id] = dict(row)
+            if float(row["dense_score"] or 0.0) != 0.0:
+                dense_scores[chunk_id] = float(row["dense_score"])
+            if float(row["lexical_score"] or 0.0) != 0.0:
+                lexical_scores[chunk_id] = float(row["lexical_score"])
+        return hybrid_retrieval_service.rank(
+            question=question,
+            rows=list(candidates.values()),
+            dense_scores=dense_scores,
+            lexical_scores=lexical_scores,
+        )
 
-    def _sqlite_vector_matches(
-        self, query_embedding: list[float], role: str, organization_id: str
-    ):
+    def _sqlite_hybrid_matches(
+        self,
+        question: str,
+        query_embedding: list[float],
+        role: str,
+        organization_id: str,
+    ) -> list[RankedMatch]:
         where = ["d.unsafe = 0", "d.organization_id = ?"]
         params: list[str] = [organization_id]
         if role != "admin":
             where.append("d.classification != ?")
             params.append("restricted")
 
+        settings = get_settings()
         with get_connection() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT c.chunk_id, c.text, c.embedding_json, d.document_id, d.title
-                FROM document_chunks c
-                JOIN documents d ON d.document_id = c.document_id
-                WHERE {' AND '.join(where)}
-                """,
-                tuple(params),
-            ).fetchall()
+            count = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*) AS count
+                    FROM document_chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE {' AND '.join(where)}
+                    """,
+                    tuple(params),
+                ).fetchone()["count"]
+            )
+            if count <= settings.rag_sqlite_dense_scan_limit:
+                rows = connection.execute(
+                    f"""
+                    SELECT c.chunk_id, c.text, c.embedding_json, c.embedding_model,
+                           c.heading, c.locator, d.document_id, d.title, d.created_at
+                    FROM document_chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE {' AND '.join(where)}
+                    """,
+                    tuple(params),
+                ).fetchall()
+            else:
+                terms = retrieval_terms(question)[:20]
+                if not terms:
+                    return []
+                match_query = " OR ".join(f'"{term}"' for term in terms)
+                rows = connection.execute(
+                    f"""
+                    SELECT c.chunk_id, c.text, c.embedding_json, c.embedding_model,
+                           c.heading, c.locator, d.document_id, d.title, d.created_at
+                    FROM document_chunks_fts
+                    JOIN document_chunks c ON c.rowid = document_chunks_fts.rowid
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE document_chunks_fts MATCH ? AND {' AND '.join(where)}
+                    ORDER BY bm25(document_chunks_fts)
+                    LIMIT ?
+                    """,
+                    (match_query, *params, settings.rag_candidate_limit),
+                ).fetchall()
 
-        scored = []
-        for row in rows:
-            embedding = decode_json(row["embedding_json"], None)
-            if not embedding:
-                embedding = embedding_service.embed(row["text"])
-            score = embedding_service.cosine_similarity(query_embedding, embedding)
-            if score > 0:
-                scored.append((score, row))
+        current_model = embedding_service.model_for_provider(settings.embedding_provider)
+        embeddings = [
+            decode_json(row["embedding_json"], None)
+            if row["embedding_model"] == current_model
+            else None
+            for row in rows
+        ]
+        return hybrid_retrieval_service.rank(
+            question=question,
+            rows=rows,
+            query_embedding=query_embedding,
+            embeddings=embeddings,
+        )
 
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return scored[:3]
-
-    def _match_to_citation(self, score: float, row) -> Citation:
+    def _match_to_citation(self, match: RankedMatch) -> Citation:
+        row = match.row
         return Citation(
             document_id=row["document_id"],
             title=row["title"],
-            excerpt=_summary(row["text"], limit=420),
+            excerpt=_citation_excerpt(row["text"]),
             chunk_id=row["chunk_id"],
-            score=round(score, 3),
+            score=round(match.score, 3),
+            dense_score=round(match.dense_score, 3),
+            lexical_score=round(match.lexical_score, 3),
+            term_coverage=round(match.term_coverage, 3),
+            heading=row["heading"],
+            locator=row["locator"],
         )
 
 rag_service = RagService()
