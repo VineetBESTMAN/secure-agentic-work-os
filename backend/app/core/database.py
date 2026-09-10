@@ -17,11 +17,13 @@ class PostgresConnection:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
-        if exc_type is None:
-            self._connection.commit()
-        else:
-            self._connection.rollback()
-        self._connection.close()
+        try:
+            if exc_type is None:
+                self._connection.commit()
+            else:
+                self._connection.rollback()
+        finally:
+            self._connection.close()
 
     def execute(self, sql: str, params: Iterable[Any] = ()):
         cursor = self._connection.cursor()
@@ -31,6 +33,17 @@ class PostgresConnection:
     def executemany(self, sql: str, params: Iterable[Iterable[Any]]) -> None:
         cursor = self._connection.cursor()
         cursor.executemany(_to_postgres_placeholders(sql), [tuple(row) for row in params])
+
+
+class SQLiteConnection(sqlite3.Connection):
+    """Match the PostgreSQL transaction context's ownership of its connection."""
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        finally:
+            self.close()
+
 
 def get_connection():
     settings = get_settings()
@@ -42,6 +55,7 @@ def get_connection():
     connection = sqlite3.connect(
         database_path,
         timeout=get_settings().sqlite_busy_timeout_seconds,
+        factory=SQLiteConnection,
     )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")

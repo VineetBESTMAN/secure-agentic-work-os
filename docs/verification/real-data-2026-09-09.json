@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-10T06:04:20.715323+00:00",
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "embedding_backend": "fastembed",
+    "model": "BAAI/bge-small-en-v1.5",
+    "embedding_threads": 2,
+    "generation": "deterministic",
+    "fastembed": "0.8.0"
+  },
+  "isolation": "Fresh disposable SQLite, uploads, checkpoints; no .env or provider secrets",
+  "ingestion": [
+    {
+      "name": "rfc2606.txt",
+      "source": "https://www.rfc-editor.org/rfc/rfc2606.txt",
+      "bytes": 8008,
+      "sha256": "b6869c8984701701bc2e6973b6ffc750d497f845cc1a65a106e9301590a13ab0",
+      "chunks": 8,
+      "quarantined": false,
+      "latency_ms": 20493.86
+    },
+    {
+      "name": "rfc8259.txt",
+      "source": "https://www.rfc-editor.org/rfc/rfc8259.txt",
+      "bytes": 28360,
+      "sha256": "61a5378f4255c720beb2a4b4a63b29540147c140f36988bf086291989b4cd2d7",
+      "chunks": 25,
+      "quarantined": false,
+      "latency_ms": 47778.86
+    },
+    {
+      "name": "rfc9309.txt",
+      "source": "https://www.rfc-editor.org/rfc/rfc9309.txt",
+      "bytes": 25265,
+      "sha256": "f633915daaa15b943cae56545d333bcf3ba4d156599e4555499686d6699fb207",
+      "chunks": 19,
+      "quarantined": false,
+      "latency_ms": 33703.66
+    },
+    {
+      "name": "workos-readme.md",
+      "source": "README.md",
+      "bytes": 38961,
+      "sha256": "17ca7034ca8ebe9430b7188e630074850b967680c6e1ed4f4bf9c51748a48a53",
+      "chunks": 43,
+      "quarantined": false,
+      "latency_ms": 71078.38
+    },
+    {
+      "name": "frontend-package.json",
+      "source": "frontend/package.json",
+      "bytes": 524,
+      "sha256": "8b4c0954a5fbdb7a063f85bfaa6a546df5ce71fd6818414f8f49f57d1d90f6cc",
+      "chunks": 7,
+      "quarantined": false,
+      "latency_ms": 3928.28
+    }
+  ],
+  "summary": {
+    "total": 22,
+    "passed": 22,
+    "answer_fact_passes": 18,
+    "answer_cases": 18,
+    "correct_refusals": 4,
+    "refusal_cases": 4,
+    "p50_latency_ms": 691.345,
+    "p95_latency_ms": 937.91
+  },
+  "cases": [
+    {
+      "id": "dns-test",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 769.36
+    },
+    {
+      "id": "dns-example",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 822.37
+    },
+    {
+      "id": "dns-invalid",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 774.44
+    },
+    {
+      "id": "dns-localhost",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 790.38
+    },
+    {
+      "id": "json-literals",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 1045.23
+    },
+    {
+      "id": "json-names",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 937.91
+    },
+    {
+      "id": "json-numbers",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 680.75
+    },
+    {
+      "id": "json-encoding",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 908.99
+    },
+    {
+      "id": "json-bom",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 769.95
+    },
+    {
+      "id": "json-array",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 732.09
+    },
+    {
+      "id": "robots-auth",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 617.02
+    },
+    {
+      "id": "robots-redirects",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 681.94
+    },
+    {
+      "id": "robots-4xx",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 653.38
+    },
+    {
+      "id": "robots-5xx",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 769.21
+    },
+    {
+      "id": "robots-cache",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 659.41
+    },
+    {
+      "id": "robots-limit",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 677.44
+    },
+    {
+      "id": "repo-build",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 699.93
+    },
+    {
+      "id": "repo-approval",
+      "passed": true,
+      "answerable": true,
+      "source_hit": true,
+      "latency_ms": 672.48
+    },
+    {
+      "id": "absent-parental-leave",
+      "passed": true,
+      "answerable": false,
+      "source_hit": null,
+      "latency_ms": 582.75
+    },
+    {
+      "id": "absent-price",
+      "passed": true,
+      "answerable": false,
+      "source_hit": null,
+      "latency_ms": 609.7
+    },
+    {
+      "id": "absent-json-sla",
+      "passed": true,
+      "answerable": false,
+      "source_hit": null,
+      "latency_ms": 682.76
+    },
+    {
+      "id": "absent-robots-fine",
+      "passed": true,
+      "answerable": false,
+      "source_hit": null,
+      "latency_ms": 658.68
+    }
+  ]
+}

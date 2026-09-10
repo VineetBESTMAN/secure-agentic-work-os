@@ -1,4 +1,7 @@
+from hashlib import sha256
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.core.rbac import require_roles, require_scope
@@ -53,7 +56,8 @@ async def upload_document(
     _validate_classification(classification)
 
     try:
-        document = rag_service.ingest_file(
+        document = await run_in_threadpool(
+            rag_service.ingest_file,
             filename=file.filename or "uploaded-document.txt",
             data=await _read_upload_limited(file),
             classification=classification,
@@ -95,7 +99,8 @@ async def queue_document_upload(
     require_scope(user.scopes, "documents:write")
     _validate_classification(classification)
     try:
-        job = background_task_service.enqueue_document(
+        job = await run_in_threadpool(
+            background_task_service.enqueue_document,
             filename=file.filename or "uploaded-document.txt",
             data=await _read_upload_limited(file),
             classification=classification,
@@ -140,14 +145,20 @@ def query_documents(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    audit_detail: dict[str, object] = {
+        "question_hash": sha256(payload.question.encode("utf-8")).hexdigest(),
+        "question_length": len(payload.question),
+        "role": user.role,
+        "flagged": scan.flagged,
+        "answerable": answer.answerable,
+        "confidence": answer.confidence,
+    }
+    if get_settings().rag_audit_query_content:
+        audit_detail["question"] = payload.question
     audit_service.record(
         actor_id=user.user_id,
         event_type="documents.query",
-        detail={
-            "question": payload.question,
-            "role": user.role,
-            "flagged": scan.flagged,
-        },
+        detail=audit_detail,
         organization_id=user.organization_id,
     )
     return answer

@@ -551,6 +551,17 @@ class WorkflowService:
         }
         action_status = status_map[execution.status]
         error = execution.error
+        if (
+            action.tool_name == "search_documents"
+            and execution.status == "completed"
+            and not bool(execution.result.get("answerable", False))
+            and self._workflow_requires_retrieved_evidence(action.workflow_id)
+        ):
+            action_status = "blocked"
+            error = (
+                "Document retrieval did not produce sufficiently relevant evidence; "
+                "downstream actions were not executed."
+            )
         if execution.status == "rejected" and not error:
             error = "The required approval was rejected."
         completed_at = self._now() if action_status in TERMINAL_ACTION_STATUSES else None
@@ -648,7 +659,11 @@ class WorkflowService:
             if prior.sequence >= action.sequence:
                 break
             answer = prior.result.get("answer")
-            if isinstance(answer, str) and answer:
+            if (
+                isinstance(answer, str)
+                and answer
+                and bool(prior.result.get("answerable", True))
+            ):
                 prior_answer = answer
 
         if action.tool_name == "search_documents":
@@ -664,6 +679,33 @@ class WorkflowService:
             if not planned.get("body"):
                 planned["body"] = prior_answer or workflow.prompt
         return mcp_gateway_service.validate_arguments(action.tool_name, planned)
+
+    @staticmethod
+    def _workflow_requires_retrieved_evidence(workflow_id: str) -> bool:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT prompt FROM agent_workflows WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return True
+        prompt_terms = {
+            token.casefold().strip(".,:;!?()[]{}")
+            for token in str(row["prompt"]).split()
+        }
+        return bool(
+            prompt_terms
+            & {
+                "according",
+                "document",
+                "documents",
+                "evidence",
+                "find",
+                "lookup",
+                "policy",
+                "search",
+            }
+        )
 
     def _insert_actions(
         self,

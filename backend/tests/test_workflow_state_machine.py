@@ -32,6 +32,19 @@ def _create_workflow(prompt: str) -> dict:
 
 
 def test_workflow_executes_safe_actions_then_resumes_after_approval(monkeypatch) -> None:
+    policy_upload = client.post(
+        "/api/documents/upload",
+        headers=_auth_headers(),
+        files={
+            "file": (
+                "workflow-approval-policy.txt",
+                "Workflow approval policy requires manager approval before sending a reply.",
+                "text/plain",
+            )
+        },
+        data={"classification": "internal", "owner_team": "security"},
+    )
+    assert policy_upload.status_code == 200
     with get_connection() as connection:
         connection.execute(
             "UPDATE connector_accounts SET status = 'disconnected' WHERE provider = 'google' AND organization_id = 'org_default'"

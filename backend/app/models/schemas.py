@@ -148,6 +148,9 @@ class DocumentChunkRecord(BaseModel):
     chunk_id: str
     chunk_index: int
     text: str
+    heading: str | None = None
+    locator: str = "document"
+    token_count: int = 0
 
 
 class DocumentDetail(DocumentRecord):
@@ -171,6 +174,11 @@ class Citation(BaseModel):
     excerpt: str
     chunk_id: str | None = None
     score: float | None = None
+    dense_score: float | None = None
+    lexical_score: float | None = None
+    term_coverage: float | None = None
+    heading: str | None = None
+    locator: str | None = None
 
 
 class RagQuery(BaseModel):
@@ -182,7 +190,10 @@ class RagAnswer(BaseModel):
     citations: list[Citation]
     generation_mode: Literal["openai", "deterministic"] = "deterministic"
     model: str = "evidence-extractive-v1"
-    grounded: bool = True
+    grounded: bool = False
+    answerable: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    retrieval_mode: Literal["hybrid", "none"] = "none"
     fallback_reason: str | None = None
 
 
@@ -273,7 +284,11 @@ class RagEvaluationResultRecord(BaseModel):
     retrieval_accuracy: float
     citation_correctness: float
     groundedness: float
+    answer_correctness: float = 0.0
     hallucination_detected: bool
+    answer: str = ""
+    answerable: bool = False
+    confidence: float = 0.0
     latency_ms: float
     error: str | None = None
     created_at: str | None = None
@@ -292,6 +307,7 @@ class RagEvaluationRunRecord(BaseModel):
     retrieval_accuracy: float
     citation_correctness: float
     groundedness: float
+    answer_correctness: float = 0.0
     hallucination_rate: float
     average_latency_ms: float
     p95_latency_ms: float

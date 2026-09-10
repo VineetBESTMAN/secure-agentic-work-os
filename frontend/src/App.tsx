@@ -132,6 +132,9 @@ type DocumentDetail = DocumentRecord & {
     chunk_id: string;
     chunk_index: number;
     text: string;
+    heading: string | null;
+    locator: string;
+    token_count: number;
   }[];
 };
 
@@ -143,10 +146,18 @@ type RagAnswer = {
     excerpt: string;
     chunk_id: string | null;
     score: number | null;
+    dense_score: number | null;
+    lexical_score: number | null;
+    term_coverage: number | null;
+    heading: string | null;
+    locator: string | null;
   }[];
   generation_mode: "openai" | "deterministic";
   model: string;
   grounded: boolean;
+  answerable: boolean;
+  confidence: number;
+  retrieval_mode: "hybrid" | "none";
   fallback_reason: string | null;
 };
 
@@ -539,6 +550,7 @@ type RagEvaluationRun = {
   retrieval_accuracy: number;
   citation_correctness: number;
   groundedness: number;
+  answer_correctness: number;
   hallucination_rate: number;
   average_latency_ms: number;
   p95_latency_ms: number;
@@ -2494,7 +2506,12 @@ export default function App() {
               <h2>Answer</h2>
             </div>
             <div className="security-summary">
-              <span>{answer.grounded ? "Citation validated" : "Grounding unavailable"}</span>
+              <span>
+                {answer.answerable
+                  ? answer.grounded ? "Relevant evidence validated" : "Grounding unavailable"
+                  : "Insufficient relevant evidence"}
+              </span>
+              <span>Confidence: {(answer.confidence * 100).toFixed(0)}%</span>
               <span>{answer.generation_mode} / {answer.model}</span>
             </div>
             <p className="answer">{answer.answer}</p>
@@ -2503,8 +2520,15 @@ export default function App() {
               {answer.citations.map((citation) => (
                 <article key={citation.chunk_id || citation.document_id} className="item">
                   <strong>{citation.title}</strong>
+                  {(citation.heading || citation.locator) && (
+                    <small>{[citation.heading, citation.locator].filter(Boolean).join(" · ")}</small>
+                  )}
                   <span>{citation.excerpt}</span>
-                  {citation.score !== null && <small>Similarity score: {citation.score}</small>}
+                  {citation.score !== null && (
+                    <small>
+                      Hybrid {citation.score} · dense {citation.dense_score ?? 0} · lexical {citation.lexical_score ?? 0}
+                    </small>
+                  )}
                 </article>
               ))}
             </div>
@@ -2830,6 +2854,7 @@ export default function App() {
                     <span><strong>{run.retrieval_accuracy.toFixed(1)}%</strong> retrieval</span>
                     <span><strong>{run.citation_correctness.toFixed(1)}%</strong> citations</span>
                     <span><strong>{run.groundedness.toFixed(1)}%</strong> grounded</span>
+                    <span><strong>{run.answer_correctness.toFixed(1)}%</strong> answer</span>
                     <span><strong>{run.hallucination_rate.toFixed(1)}%</strong> hallucination</span>
                   </div>
                   <small>
@@ -2965,6 +2990,7 @@ export default function App() {
               {selectedDocument.chunks.map((chunk) => (
                 <article key={chunk.chunk_id} className="item">
                   <strong>Chunk {chunk.chunk_index + 1}</strong>
+                  <small>{[chunk.heading, chunk.locator, `${chunk.token_count} words`].filter(Boolean).join(" · ")}</small>
                   <span>{chunk.text}</span>
                 </article>
               ))}

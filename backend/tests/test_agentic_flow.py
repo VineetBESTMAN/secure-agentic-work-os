@@ -173,8 +173,8 @@ def test_policy_job_connector_import_and_agent_workflow_foundations() -> None:
             "provider": "google",
             "items": [
                 {
-                    "filename": "drive-client-note.txt",
-                    "content": "Google Drive note: client renewal needs a task this week.",
+                    "filename": "urgent-client-work.txt",
+                    "content": "Google Drive note: urgent client renewal needs a task this week.",
                     "classification": "internal",
                     "owner_team": "sales",
                 }
@@ -183,7 +183,7 @@ def test_policy_job_connector_import_and_agent_workflow_foundations() -> None:
     )
     assert connector_import.status_code == 200
     assert connector_import.json()["job"]["status"] == "completed"
-    assert connector_import.json()["imported_documents"][0]["title"] == "drive client note"
+    assert connector_import.json()["imported_documents"][0]["title"] == "urgent client work"
 
     jobs = client.get("/api/jobs", headers=headers)
     assert jobs.status_code == 200
@@ -266,8 +266,8 @@ def test_google_drive_file_list_and_selected_import(monkeypatch) -> None:
             if url.endswith("/files/drive_file_1") and params.get("alt") == "media":
                 return FakeDriveResponse(
                     content=(
-                        b"Drive client note: renewal needs manager approval before sending "
-                        b"external summaries."
+                        b"Drive client note: ApolloDrive renewal needs manager approval before "
+                        b"sending external summaries."
                     )
                 )
             if url.endswith("/files/drive_file_1"):
@@ -306,10 +306,12 @@ def test_google_drive_file_list_and_selected_import(monkeypatch) -> None:
     query = client.post(
         "/api/documents/query",
         headers=headers,
-        json={"question": "What does the Drive note require?"},
+        json={"question": "What ApolloDrive approval is required before external summaries?"},
     )
     assert query.status_code == 200
-    assert "Drive Client Note" in {citation["title"] for citation in query.json()["citations"]}
+    assert "Drive Client Note" in {
+        citation["title"] for citation in query.json()["citations"]
+    }, query.json()
 
 
 def test_mcp_gateway_requires_approval_for_send_email() -> None:

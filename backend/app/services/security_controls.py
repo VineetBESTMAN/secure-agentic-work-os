@@ -188,6 +188,16 @@ class SecurityControlService:
             actor_id=actor_id,
             organization_id=organization_id,
         )
+        return self.inspect_text(
+            filename=filename, data=data, text=text, actor_id=actor_id,
+            organization_id=organization_id,
+        )
+
+    def inspect_text(
+        self, *, filename: str, data: bytes, text: str, actor_id: str,
+        organization_id: str,
+    ) -> SecurityInspection:
+        """Inspect extracted text after the caller has completed binary preflight."""
         policy = self.get_policy(organization_id)
         if policy.dlp_mode == "disabled":
             return SecurityInspection()
@@ -366,7 +376,12 @@ class SecurityControlService:
     def _scan_dlp(
         self, text: str, enabled_types: set[str]
     ) -> list[dict[str, object]]:
-        bounded = text[: get_settings().dlp_scan_max_bytes]
+        if len(text.encode("utf-8")) > get_settings().dlp_scan_max_bytes:
+            raise SecurityInspectionError(
+                "Extracted text exceeds the DLP inspection limit. Split the document "
+                "or ask an administrator to increase APP_DLP_SCAN_MAX_BYTES."
+            )
+        bounded = text
         findings: list[dict[str, object]] = []
         if "api_key" in enabled_types:
             for pattern in self._api_key_patterns:

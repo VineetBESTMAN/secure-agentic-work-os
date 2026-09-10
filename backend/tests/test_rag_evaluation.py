@@ -110,7 +110,7 @@ def test_provider_comparison_persists_different_quality(monkeypatch) -> None:
     )
     decoy = _upload(
         f"cafeteria-menu-{suffix}.txt",
-        "The cafeteria serves soup on Tuesdays.",
+        "The Orchid deployments cafeteria serves soup on Tuesdays.",
     )
 
     create = client.post(
@@ -139,7 +139,12 @@ def test_provider_comparison_persists_different_quality(monkeypatch) -> None:
         lambda provider: None,
     )
 
-    def fake_embed_many(texts: list[str], provider: str | None = None) -> list[list[float]]:
+    def fake_embed_many(
+        texts: list[str],
+        provider: str | None = None,
+        *,
+        input_type: str = "document",
+    ) -> list[list[float]]:
         vectors = []
         for text in texts:
             is_question = text.startswith("Who approves")
@@ -161,7 +166,9 @@ def test_provider_comparison_persists_different_quality(monkeypatch) -> None:
     runs = {item["provider"]: item for item in comparison.json()["runs"]}
     assert runs["local"]["retrieval_accuracy"] == 100.0
     assert runs["openai"]["retrieval_accuracy"] == 0.0
+    assert runs["openai"]["answer_correctness"] == 0.0
     assert runs["openai"]["hallucination_rate"] == 100.0
+    assert runs["openai"]["results"][0]["answerable"] is True
 
 
 def test_rag_evaluation_requires_manager_role_and_valid_expectations() -> None:

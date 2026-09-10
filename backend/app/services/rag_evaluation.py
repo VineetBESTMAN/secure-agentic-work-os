@@ -6,8 +6,15 @@ from statistics import mean
 from uuid import uuid4
 
 from app.core.config import get_settings
-from app.core.database import decode_json, encode_json, get_connection
+from app.core.database import (
+    decode_json,
+    encode_json,
+    get_connection,
+    is_postgres_database,
+)
 from app.models.schemas import (
+    Citation,
+    RagAnswer,
     RagEvaluationCaseRecord,
     RagEvaluationCitation,
     RagEvaluationComparison,
@@ -17,7 +24,9 @@ from app.models.schemas import (
     RagEvaluationRunRecord,
 )
 from app.services.embeddings import embedding_service
+from app.services.grounded_answers import grounded_answer_service
 from app.services.observability import observability_service
+from app.services.retrieval import RankedMatch, hybrid_retrieval_service, retrieval_terms
 
 EVIDENCE_TOKEN_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,}")
 EVIDENCE_STOP_WORDS = {
@@ -65,8 +74,8 @@ def _p95(values: list[float]) -> float:
     return round(ordered[index], 3)
 
 
-def _excerpt(text: str, limit: int = 420) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
+def _excerpt(text: str, limit: int = 3_000) -> str:
+    cleaned = "\n".join(line.rstrip() for line in text.strip().splitlines())
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[:limit].rsplit(" ", 1)[0] + "..."
@@ -397,28 +406,56 @@ class RagEvaluationService:
         organization_id: str = "org_default",
     ) -> None:
         index_started = time.perf_counter()
-        corpus_embeddings = embedding_service.embed_many(
-            [row["text"] for row in corpus], provider=provider
-        )
+        model = embedding_service.model_for_provider(provider)
+        stored_embeddings = [
+            decode_json(row["stored_embedding"], None)
+            if row["embedding_model"] == model
+            else None
+            for row in corpus
+        ]
+        if all(stored_embeddings):
+            corpus_embeddings = stored_embeddings
+        else:
+            corpus_embeddings = embedding_service.embed_many(
+                [(f"Section: {row['heading']}\n" if row["heading"] else "") + row["text"]
+                 for row in corpus],
+                provider=provider,
+                input_type="document",
+            )
         index_latency_ms = (time.perf_counter() - index_started) * 1_000
 
         results: list[dict[str, object]] = []
         for case in dataset.cases:
             started = time.perf_counter()
-            query_embedding = embedding_service.embed(case.question, provider=provider)
-            matches: list[tuple[float, object]] = []
-            for row, embedding in zip(corpus, corpus_embeddings):
-                score = embedding_service.cosine_similarity(query_embedding, embedding)
-                if score > dataset.minimum_score:
-                    matches.append((score, row))
-            matches.sort(key=lambda item: item[0], reverse=True)
-            selected = matches[: dataset.top_k]
+            query_embedding = embedding_service.embed(
+                case.question,
+                provider=provider,
+                input_type="query",
+            )
+            selected = hybrid_retrieval_service.rank(
+                question=case.question,
+                rows=corpus,
+                query_embedding=query_embedding,
+                embeddings=corpus_embeddings,
+                top_k=dataset.top_k,
+                minimum_score=dataset.minimum_score,
+            )
+            answer = grounded_answer_service.generate(
+                question=case.question,
+                citations=[self._match_to_citation(match) for match in selected],
+                actor_id="rag-evaluation",
+                organization_id=organization_id,
+                force_deterministic=True,
+            )
             latency_ms = (time.perf_counter() - started) * 1_000
-            results.append(self._score_case(run_id, case, selected, latency_ms))
+            results.append(
+                self._score_case(run_id, case, selected, answer, latency_ms)
+            )
 
         retrieval_values = [float(result["retrieval_accuracy"]) for result in results]
         citation_values = [float(result["citation_correctness"]) for result in results]
         groundedness_values = [float(result["groundedness"]) for result in results]
+        answer_values = [float(result["answer_correctness"]) for result in results]
         latency_values = [float(result["latency_ms"]) for result in results]
         hallucinations = sum(bool(result["hallucination_detected"]) for result in results)
 
@@ -428,9 +465,10 @@ class RagEvaluationService:
                 INSERT INTO rag_evaluation_results (
                     result_id, run_id, case_id, question, citations_json,
                     retrieval_accuracy, citation_correctness, groundedness,
-                    hallucination_detected, latency_ms, error, organization_id
+                    hallucination_detected, latency_ms, error, organization_id,
+                    answer, answerable, confidence, answer_correctness
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -446,6 +484,10 @@ class RagEvaluationService:
                         result["latency_ms"],
                         None,
                         organization_id,
+                        result["answer"],
+                        result["answerable"],
+                        result["confidence"],
+                        result["answer_correctness"],
                     )
                     for result in results
                 ],
@@ -455,7 +497,8 @@ class RagEvaluationService:
                 UPDATE rag_evaluation_runs
                 SET status = ?, case_count = ?, retrieval_accuracy = ?,
                     citation_correctness = ?, groundedness = ?, hallucination_rate = ?,
-                    average_latency_ms = ?, p95_latency_ms = ?, index_latency_ms = ?,
+                    answer_correctness = ?, average_latency_ms = ?, p95_latency_ms = ?,
+                    index_latency_ms = ?,
                     error = NULL, completed_at = ?
                 WHERE run_id = ?
                 """,
@@ -466,6 +509,7 @@ class RagEvaluationService:
                     _average(citation_values),
                     _average(groundedness_values),
                     _percent(hallucinations / len(results)) if results else 0.0,
+                    _average(answer_values),
                     _average(latency_values),
                     _p95(latency_values),
                     round(index_latency_ms, 3),
@@ -478,18 +522,24 @@ class RagEvaluationService:
         self,
         run_id: str,
         case: RagEvaluationCaseRecord,
-        matches: list[tuple[float, object]],
+        matches: list[RankedMatch],
+        answer: RagAnswer,
         latency_ms: float,
     ) -> dict[str, object]:
         expected_chunks = set(case.expected_chunk_ids)
         expected_documents = set(case.expected_document_ids)
 
         def is_expected(row) -> bool:
+            excerpt = _excerpt(row["text"])
             if expected_chunks:
-                return row["chunk_id"] in expected_chunks
-            return row["document_id"] in expected_documents
+                identifier_matches = row["chunk_id"] in expected_chunks
+            else:
+                identifier_matches = row["document_id"] in expected_documents
+            return identifier_matches and any(
+                _fact_supported(fact, excerpt) for fact in case.expected_facts
+            )
 
-        citations = [
+        retrieval_citations = [
             {
                 "document_id": row["document_id"],
                 "chunk_id": row["chunk_id"],
@@ -498,44 +548,75 @@ class RagEvaluationService:
                 "score": round(score, 6),
                 "expected": is_expected(row),
             }
-            for score, row in matches
+            for match in matches
+            for row, score in ((match.row, match.score),)
+        ]
+        answer_chunk_ids = {
+            citation.chunk_id for citation in answer.citations if citation.chunk_id
+        }
+        citations = [
+            citation
+            for citation in retrieval_citations
+            if citation["chunk_id"] in answer_chunk_ids
         ]
         if case.unanswerable:
-            retrieval_accuracy = 100.0 if not citations else 0.0
+            retrieval_accuracy = 100.0 if not retrieval_citations else 0.0
             citation_correctness = 100.0 if not citations else 0.0
-            groundedness = 100.0 if not citations else 0.0
-            hallucination_detected = bool(citations)
+            groundedness = 100.0 if not answer.answerable else 0.0
+            answer_correctness = 100.0 if not answer.answerable else 0.0
+            hallucination_detected = answer.answerable
         else:
             if expected_chunks:
                 retrieved_expected = {
                     citation["chunk_id"]
-                    for citation in citations
+                    for citation in retrieval_citations
                     if citation["chunk_id"] in expected_chunks
                 }
-                retrieval_accuracy = _percent(
+                identifier_recall = _percent(
                     len(retrieved_expected) / len(expected_chunks)
                 )
             else:
                 retrieved_expected = {
                     citation["document_id"]
-                    for citation in citations
+                    for citation in retrieval_citations
                     if citation["document_id"] in expected_documents
                 }
-                retrieval_accuracy = _percent(
+                identifier_recall = _percent(
                     len(retrieved_expected) / len(expected_documents)
                 )
             correct_citations = sum(bool(citation["expected"]) for citation in citations)
             citation_correctness = (
                 _percent(correct_citations / len(citations)) if citations else 0.0
             )
-            evidence = " ".join(str(citation["excerpt"]) for citation in citations)
+            evidence = " ".join(
+                str(citation["excerpt"]) for citation in retrieval_citations
+            )
             supported_facts = sum(
                 _fact_supported(fact, evidence) for fact in case.expected_facts
             )
-            groundedness = _percent(supported_facts / len(case.expected_facts))
-            hallucination_detected = any(
-                not bool(citation["expected"]) for citation in citations
-            ) or bool(citations and groundedness == 0.0)
+            fact_recall = _percent(supported_facts / len(case.expected_facts))
+            retrieval_accuracy = round((identifier_recall + fact_recall) / 2, 2)
+            groundedness = self._answer_groundedness(answer)
+            answer_fact_recall = _percent(
+                sum(_fact_supported(fact, answer.answer) for fact in case.expected_facts)
+                / len(case.expected_facts)
+            )
+            reference_recall = self._token_recall(
+                case.reference_answer, answer.answer
+            )
+            answer_correctness = (
+                round(0.8 * answer_fact_recall + 0.2 * reference_recall, 2)
+                if answer_fact_recall > 0.0
+                else 0.0
+            )
+            hallucination_detected = bool(
+                answer.answerable
+                and (
+                    groundedness < 100.0
+                    or answer_correctness < 75.0
+                    or citation_correctness < 100.0
+                )
+            )
 
         return {
             "result_id": f"evalresult_{uuid4().hex}",
@@ -546,9 +627,52 @@ class RagEvaluationService:
             "retrieval_accuracy": round(retrieval_accuracy, 2),
             "citation_correctness": round(citation_correctness, 2),
             "groundedness": round(groundedness, 2),
+            "answer_correctness": round(answer_correctness, 2),
             "hallucination_detected": hallucination_detected,
+            "answer": answer.answer,
+            "answerable": answer.answerable,
+            "confidence": answer.confidence,
             "latency_ms": round(latency_ms, 3),
         }
+
+    @staticmethod
+    def _match_to_citation(match: RankedMatch) -> Citation:
+        row = match.row
+        return Citation(
+            document_id=row["document_id"],
+            title=row["title"],
+            excerpt=_excerpt(row["text"]),
+            chunk_id=row["chunk_id"],
+            score=match.score,
+            dense_score=match.dense_score,
+            lexical_score=match.lexical_score,
+            term_coverage=match.term_coverage,
+            heading=row["heading"],
+            locator=row["locator"],
+        )
+
+    @classmethod
+    def _answer_groundedness(cls, answer: RagAnswer) -> float:
+        if not answer.answerable or not answer.grounded or not answer.citations:
+            return 0.0
+        evidence = " ".join(citation.excerpt for citation in answer.citations)
+        sentences = []
+        for sentence in re.split(r"(?<=[.!?])\s+", answer.answer):
+            cleaned = re.sub(r"\[\d+\]", "", sentence).strip()
+            if cleaned:
+                sentences.append(cleaned)
+        if not sentences:
+            return 0.0
+        supported = sum(cls._token_recall(sentence, evidence) >= 75.0 for sentence in sentences)
+        return _percent(supported / len(sentences))
+
+    @staticmethod
+    def _token_recall(expected: str, actual: str) -> float:
+        expected_terms = set(retrieval_terms(expected))
+        if not expected_terms:
+            return 0.0
+        actual_terms = set(retrieval_terms(actual))
+        return _percent(len(expected_terms & actual_terms) / len(expected_terms))
 
     def _create_run(
         self,
@@ -599,7 +723,7 @@ class RagEvaluationService:
         role: str,
         organization_id: str = "org_default",
     ) -> list:
-        where = ["d.unsafe = ?", "d.organization_id = ?"]
+        where = ["d.unsafe = ?", "d.organization_id = ?", "c.organization_id = d.organization_id"]
         params: list[object] = [False, organization_id]
         if role != "admin":
             where.append("d.classification != ?")
@@ -609,10 +733,16 @@ class RagEvaluationService:
             where.append(f"d.document_id IN ({placeholders})")
             params.extend(document_ids)
 
+        embedding_projection = (
+            "c.embedding_model, c.embedding::text AS stored_embedding"
+            if is_postgres_database()
+            else "c.embedding_model, c.embedding_json AS stored_embedding"
+        )
         with get_connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT c.chunk_id, c.text, c.chunk_index, d.document_id, d.title
+                SELECT c.chunk_id, c.text, c.chunk_index, c.heading, c.locator,
+                       d.document_id, d.title, d.created_at, {embedding_projection}
                 FROM document_chunks c
                 JOIN documents d ON d.document_id = c.document_id
                 WHERE {' AND '.join(where)}
@@ -691,7 +821,11 @@ class RagEvaluationService:
             retrieval_accuracy=float(row["retrieval_accuracy"]),
             citation_correctness=float(row["citation_correctness"]),
             groundedness=float(row["groundedness"]),
+            answer_correctness=float(row["answer_correctness"]),
             hallucination_detected=bool(row["hallucination_detected"]),
+            answer=row["answer"],
+            answerable=bool(row["answerable"]),
+            confidence=float(row["confidence"]),
             latency_ms=float(row["latency_ms"]),
             error=row["error"],
             created_at=_as_string(row["created_at"]),
@@ -713,6 +847,7 @@ class RagEvaluationService:
             retrieval_accuracy=float(row["retrieval_accuracy"]),
             citation_correctness=float(row["citation_correctness"]),
             groundedness=float(row["groundedness"]),
+            answer_correctness=float(row["answer_correctness"]),
             hallucination_rate=float(row["hallucination_rate"]),
             average_latency_ms=float(row["average_latency_ms"]),
             p95_latency_ms=float(row["p95_latency_ms"]),

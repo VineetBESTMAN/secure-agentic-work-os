@@ -46,5 +46,11 @@ try {
     Write-Output "Production Compose, Prometheus, Alertmanager, and Caddy configuration passed."
 }
 finally {
+    $resolvedTemporary = [System.IO.Path]::GetFullPath($temporary)
+    $resolvedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (-not $resolvedTemporary.StartsWith($resolvedTempRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Split-Path -Leaf $resolvedTemporary).StartsWith('workos-production-')) {
+        throw 'Refusing cleanup outside the verification temporary directory.'
+    }
     Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }
