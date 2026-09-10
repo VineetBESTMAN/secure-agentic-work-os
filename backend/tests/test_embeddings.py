@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.core.config import get_settings
 from app.services.embeddings import EmbeddingService
 
@@ -40,6 +42,9 @@ def test_openai_embeddings_use_configured_model_and_dimensions(monkeypatch) -> N
             calls["timeout"] = timeout
             self.embeddings = FakeEmbeddings()
 
+        def close(self):
+            calls["closed"] = True
+
     monkeypatch.setattr("app.services.embeddings.OpenAI", FakeOpenAI)
     monkeypatch.setenv("APP_EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("APP_VECTOR_DIMENSIONS", "4")
@@ -55,6 +60,7 @@ def test_openai_embeddings_use_configured_model_and_dimensions(monkeypatch) -> N
 
     assert calls["api_key"] == "sk-test"
     assert calls["timeout"] == 7
+    assert calls["closed"] is True
     assert calls["request"] == {
         "input": ["first text", "second text"],
         "model": "text-embedding-3-small",
@@ -110,3 +116,27 @@ def test_fastembed_uses_query_and_passage_encoders(monkeypatch, tmp_path) -> Non
         ("query", ["approval question"]),
         ("document", ["approval policy"]),
     ]
+
+
+@pytest.mark.parametrize("vectors", [[], [[1.0]], [[float('nan')] * 384]])
+def test_embedding_batches_reject_incomplete_wrong_sized_or_nonfinite_vectors(monkeypatch, vectors):
+    service = EmbeddingService()
+    monkeypatch.setattr(service, "_local_embed_many", lambda *args, **kwargs: vectors)
+    with pytest.raises(ValueError, match="Embedding provider"):
+        service.embed_many(["one input"])
+
+
+def test_embedding_network_client_closes_on_provider_error(monkeypatch):
+    calls = []
+    class FailingClient:
+        def __init__(self, **kwargs):
+            self.embeddings = self
+        def create(self, **kwargs):
+            raise RuntimeError("simulated provider outage")
+        def close(self):
+            calls.append("closed")
+    monkeypatch.setattr("app.services.embeddings.OpenAI", FailingClient)
+    monkeypatch.setattr(get_settings(), "openai_api_key", "not-a-real-key")
+    with pytest.raises(RuntimeError, match="simulated"):
+        EmbeddingService().embed("request", provider="openai")
+    assert calls == ["closed"]

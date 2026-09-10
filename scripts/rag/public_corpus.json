@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {"name": "rfc2606.txt", "url": "https://www.rfc-editor.org/rfc/rfc2606.txt", "sha256": "b6869c8984701701bc2e6973b6ffc750d497f845cc1a65a106e9301590a13ab0"},
+    {"name": "rfc8259.txt", "url": "https://www.rfc-editor.org/rfc/rfc8259.txt", "sha256": "61a5378f4255c720beb2a4b4a63b29540147c140f36988bf086291989b4cd2d7"},
+    {"name": "rfc9309.txt", "url": "https://www.rfc-editor.org/rfc/rfc9309.txt", "sha256": "f633915daaa15b943cae56545d333bcf3ba4d156599e4555499686d6699fb207"}
+  ],
+  "cases": [
+    {"id": "dns-test", "source": "rfc2606.txt", "question": "What is the .test top-level domain recommended for?", "facts": ["testing"]},
+    {"id": "dns-example", "source": "rfc2606.txt", "question": "What is the .example top-level domain recommended for?", "facts": ["documentation"]},
+    {"id": "dns-invalid", "source": "rfc2606.txt", "question": "What is the .invalid top-level domain intended for?", "facts": ["invalid"]},
+    {"id": "dns-localhost", "source": "rfc2606.txt", "question": "Which IP address does the localhost A record point to?", "facts": ["loop back"]},
+    {"id": "json-literals", "source": "rfc8259.txt", "question": "Must JSON literal names be lowercase?", "facts": ["lowercase"]},
+    {"id": "json-names", "source": "rfc8259.txt", "question": "Should the names within a JSON object be unique?", "facts": ["unique"]},
+    {"id": "json-numbers", "source": "rfc8259.txt", "question": "Are Infinity and NaN permitted as JSON numbers?", "facts": ["not permitted"]},
+    {"id": "json-encoding", "source": "rfc8259.txt", "question": "What encoding must JSON text exchanged between systems use?", "facts": ["utf-8"]},
+    {"id": "json-bom", "source": "rfc8259.txt", "question": "May JSON generators add a byte order mark to network-transmitted JSON text?", "facts": ["must not"]},
+    {"id": "json-array", "source": "rfc8259.txt", "question": "Is a JSON array an ordered or unordered sequence of values?", "facts": ["ordered sequence"]},
+    {"id": "robots-auth", "source": "rfc9309.txt", "question": "Are robots.txt rules a form of access authorization?", "facts": ["not a form of access authorization"]},
+    {"id": "robots-redirects", "source": "rfc9309.txt", "question": "How many consecutive redirects should crawlers follow for robots.txt?", "facts": ["five"]},
+    {"id": "robots-4xx", "source": "rfc9309.txt", "question": "Can a crawler access resources when robots.txt is unavailable with a 400-499 status code?", "facts": ["may access"]},
+    {"id": "robots-5xx", "source": "rfc9309.txt", "question": "What must a crawler assume when robots.txt is unreachable with a 500-599 status code?", "facts": ["complete disallow"]},
+    {"id": "robots-cache", "source": "rfc9309.txt", "question": "How long should crawlers normally cache robots.txt?", "facts": ["24 hours"]},
+    {"id": "robots-limit", "source": "rfc9309.txt", "question": "What minimum parsing limit in kibibytes must crawlers support for robots.txt?", "facts": ["500 kibibytes"]},
+    {"id": "repo-build", "source": "frontend-package.json", "question": "What command does the frontend package use to build the application?", "facts": ["tsc && vite build"]},
+    {"id": "repo-approval", "source": "workos-readme.md", "question": "How does canonical payload hashing protect approvals?", "facts": ["canonical sha-256 hash"]},
+    {"id": "absent-parental-leave", "question": "What is the paid parental leave policy in Brazil?", "unanswerable": true},
+    {"id": "absent-price", "question": "What is the annual registration price of a .test domain in dollars?", "unanswerable": true},
+    {"id": "absent-json-sla", "question": "What uptime percentage does RFC 8259 guarantee for JSON servers?", "unanswerable": true},
+    {"id": "absent-robots-fine", "question": "How many dollars is the fine for ignoring robots.txt?", "unanswerable": true}
+  ]
+}

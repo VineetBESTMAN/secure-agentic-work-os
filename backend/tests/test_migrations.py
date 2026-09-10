@@ -70,7 +70,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
         evaluation_result_columns
     )
     assert "document_chunks_fts" in tables
-    assert revision == ("20260821_0014",)
+    assert revision == ("20260908_0015",)
 
     downgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
@@ -85,7 +85,7 @@ def test_migration_round_trip_creates_versioned_schema(tmp_path: Path) -> None:
     upgrade_database(database_url)
     with sqlite3.connect(database_path) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert revision == ("20260821_0014",)
+        assert revision == ("20260908_0015",)
 
 
 def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Path) -> None:
@@ -202,7 +202,7 @@ def test_initial_migration_adopts_existing_tables_without_data_loss(tmp_path: Pa
         )
 
     assert user == ("existing-user", "existing@example.com")
-    assert revision == ("20260821_0014",)
+    assert revision == ("20260908_0015",)
     assert documents_exists == (1,)
     assert workflow_actions == [
         (0, "search_documents", "pending"),
@@ -261,7 +261,7 @@ def test_object_storage_migration_backfills_existing_documents(tmp_path: Path) -
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
 
     assert storage == ("local", "doc_existing_existing.txt")
-    assert revision == ("20260821_0014",)
+    assert revision == ("20260908_0015",)
 
 
 def test_reliability_migration_preserves_existing_job_state(tmp_path: Path) -> None:
@@ -307,3 +307,28 @@ def test_reliability_migration_preserves_existing_job_state(tmp_path: Path) -> N
     assert job["last_error"] is None
     assert {"duplicate_count", "last_duplicate_at"} <= webhook_columns
     assert "idx_background_jobs_organization_status_updated" in indexes
+
+
+def test_fts_tokenizer_upgrade_preserves_content_and_index_triggers(tmp_path: Path) -> None:
+    path = tmp_path / "fts-preservation.db"
+    url = _sqlite_url(path)
+    upgrade_database(url, revision="20260821_0014")
+    with sqlite3.connect(path) as connection:
+        connection.execute("""INSERT INTO documents (
+            document_id, title, filename, classification, owner_team, summary,
+            uploaded_by, unsafe, unsafe_reasons_json, organization_id
+        ) VALUES ('preserved', 'Preserved', 'preserved.txt', 'internal', 'ops',
+                  'Original content', 'system', 0, '[]', 'org_default')""")
+        connection.execute("""INSERT INTO document_chunks (
+            chunk_id, document_id, chunk_index, text, organization_id
+        ) VALUES ('preserved-chunk', 'preserved', 0, 'Escalations require approvals.', 'org_default')""")
+    upgrade_database(url)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT text FROM document_chunks").fetchone() == ("Escalations require approvals.",)
+        assert connection.execute("SELECT count(*) FROM document_chunks_fts WHERE document_chunks_fts MATCH 'escalation'").fetchone() == (1,)
+        connection.execute("UPDATE document_chunks SET text = 'Renewals require reviews.' WHERE chunk_id = 'preserved-chunk'")
+        assert connection.execute("SELECT count(*) FROM document_chunks_fts WHERE document_chunks_fts MATCH 'renewal'").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM document_chunks_fts WHERE document_chunks_fts MATCH 'escalation'").fetchone() == (0,)
+    downgrade_database(url, revision="20260821_0014")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT text FROM document_chunks").fetchone() == ("Renewals require reviews.",)

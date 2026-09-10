@@ -11,6 +11,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 
 WORD_PATTERN = re.compile(r"\S+")
@@ -41,6 +42,16 @@ class PreparedChunk:
 
 
 def extract_sections(filename: str, data: bytes) -> list[ExtractedSection]:
+    try:
+        return _extract_sections(filename, data)
+    except (PdfReadError, zipfile.BadZipFile, KeyError, ElementTree.ParseError,
+            UnicodeError, csv.Error) as exc:
+        raise ValueError(
+            "Could not read the document. Check its format and encoding, and export it again."
+        ) from exc
+
+
+def _extract_sections(filename: str, data: bytes) -> list[ExtractedSection]:
     suffix = Path(filename).suffix.lower()
     if suffix == ".pdf":
         return _extract_pdf(data)
@@ -69,6 +80,8 @@ def chunk_sections(
     maximum_words: int = 240,
     overlap_words: int = 30,
 ) -> list[PreparedChunk]:
+    if not 0 <= overlap_words < target_words <= maximum_words:
+        raise ValueError("Chunk sizes must satisfy 0 <= overlap < target <= maximum.")
     prepared: list[PreparedChunk] = []
     for section in sections:
         text = section.text.strip()
@@ -91,7 +104,10 @@ def chunk_sections(
                 continue
             if current and current_words + block_words > target_words:
                 section_chunks.append("\n\n".join(current))
-                overlap = current[-1] if len(WORD_PATTERN.findall(current[-1])) <= overlap_words else ""
+                overlap = current[-1] if (
+                    len(WORD_PATTERN.findall(current[-1])) <= overlap_words
+                    and len(WORD_PATTERN.findall(current[-1])) + block_words <= maximum_words
+                ) else ""
                 current = [overlap] if overlap else []
                 current_words = len(WORD_PATTERN.findall(overlap)) if overlap else 0
             current.append(block)
@@ -113,19 +129,28 @@ def chunk_sections(
                     content_hash=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
                 )
             )
-    return _merge_adjacent_sections(prepared, target_words=300)
+    return prepared
 
 
 def joined_text(sections: list[ExtractedSection]) -> str:
-    return "\n\n".join(section.text.strip() for section in sections if section.text.strip())
+    return "\n\n".join(
+        "\n".join(part for part in (section.heading, section.text.strip()) if part)
+        for section in sections if section.text.strip() or section.heading
+    )
 
 
 def _decode(data: bytes) -> str:
-    return data.decode("utf-8-sig", errors="replace")
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return data.decode("utf-32")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    return data.decode("utf-8-sig")
 
 
 def _extract_pdf(data: bytes) -> list[ExtractedSection]:
     reader = PdfReader(BytesIO(data))
+    if reader.is_encrypted and not reader.decrypt(""):
+        raise ValueError("Could not read password-protected PDF; export an unlocked copy.")
     sections = []
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
@@ -149,17 +174,20 @@ def _extract_docx(data: bytes) -> list[ExtractedSection]:
     paragraph_number = 0
     table_number = 0
     buffered: list[str] = []
+    buffer_start: int | None = None
 
     def flush(locator: str) -> None:
+        nonlocal buffer_start
         if buffered:
             sections.append(
                 ExtractedSection(
                     text="\n".join(buffered),
                     heading=heading,
-                    locator=locator,
+                    locator=f"paragraph {buffer_start}" if buffer_start else locator,
                 )
             )
             buffered.clear()
+            buffer_start = None
 
     for child in body:
         if child.tag == f"{WORD}p":
@@ -173,6 +201,8 @@ def _extract_docx(data: bytes) -> list[ExtractedSection]:
                 flush(f"paragraph {max(1, paragraph_number - len(buffered))}")
                 heading = text
             else:
+                if buffer_start is None:
+                    buffer_start = paragraph_number
                 buffered.append(text)
         elif child.tag == f"{WORD}tbl":
             flush(f"paragraph {max(1, paragraph_number - len(buffered) + 1)}")
@@ -204,6 +234,7 @@ def _extract_markdown(text: str) -> list[ExtractedSection]:
     hierarchy: dict[int, str] = {}
     buffered: list[str] = []
     current_heading: str | None = None
+    fence: str | None = None
 
     def flush() -> None:
         if any(line.strip() for line in buffered):
@@ -217,6 +248,18 @@ def _extract_markdown(text: str) -> list[ExtractedSection]:
         buffered.clear()
 
     for line in text.splitlines():
+        fence_match = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+            buffered.append(line)
+            continue
+        if fence is not None:
+            buffered.append(line)
+            continue
         match = MARKDOWN_HEADING.match(line)
         if not match:
             buffered.append(line)
@@ -236,14 +279,18 @@ def _extract_csv(text: str) -> list[ExtractedSection]:
         return []
     header = rows[0]
     sections = []
-    for start in range(1, len(rows), 25):
-        batch = rows[start : start + 25]
-        rendered = [" | ".join(header), *(" | ".join(row) for row in batch)]
+    for index, row in enumerate(rows[1:], start=2):
+        if not any(cell.strip() for cell in row):
+            continue
+        rendered = [
+            f"{header[column].strip() if column < len(header) and header[column].strip() else f'Column {column + 1}'}: {value}"
+            for column, value in enumerate(row)
+        ]
         sections.append(
             ExtractedSection(
-                text="\n".join(rendered),
-                heading="CSV rows",
-                locator=f"rows {start + 1}-{start + len(batch)}",
+                text="; ".join(rendered),
+                heading="CSV row",
+                locator=f"row {index}",
             )
         )
     if len(rows) == 1:
@@ -258,6 +305,13 @@ def _extract_json(text: str) -> list[ExtractedSection]:
         value = json.loads(text)
     except json.JSONDecodeError:
         return [ExtractedSection(text=text, heading=None, locator="document")]
+    if isinstance(value, dict) and any(isinstance(item, (dict, list)) for item in value.values()):
+        # Keep top-level keys attached to their values; large unrelated objects
+        # should not dilute small command/configuration sections.
+        return [ExtractedSection(
+            text=json.dumps({key: item}, ensure_ascii=False, indent=2, sort_keys=True),
+            heading=f"JSON > {key}", locator=f"JSON key {key}",
+        ) for key, item in value.items()]
     formatted = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
     return [ExtractedSection(text=formatted, heading="JSON document", locator="document")]
 
@@ -297,52 +351,3 @@ def _window_text(text: str, size: int, overlap: int) -> list[str]:
         if start + size >= len(words):
             break
     return windows
-
-
-def _merge_adjacent_sections(
-    chunks: list[PreparedChunk], *, target_words: int
-) -> list[PreparedChunk]:
-    """Reduce tiny-section inference overhead while retaining inline structure labels."""
-    merged: list[PreparedChunk] = []
-    for chunk in chunks:
-        if not merged:
-            merged.append(chunk)
-            continue
-        previous = merged[-1]
-        mergeable_locator = (
-            previous.locator.startswith("section ")
-            and chunk.locator.startswith("section ")
-            and " – " not in previous.locator
-        )
-        previous_root = (previous.heading or "").split(" > ", 1)[0]
-        current_root = (chunk.heading or "").split(" > ", 1)[0]
-        if (
-            not mergeable_locator
-            or previous_root != current_root
-            or previous.token_count + chunk.token_count > target_words
-        ):
-            merged.append(chunk)
-            continue
-
-        parts = []
-        for item in (previous, chunk):
-            if item.heading:
-                parts.append(f"## {item.heading}\n{item.text}")
-            else:
-                parts.append(item.text)
-        text = "\n\n".join(parts)
-        headings = list(
-            dict.fromkeys(
-                heading for heading in (previous.heading, chunk.heading) if heading
-            )
-        )
-        heading = " | ".join(headings)
-        locator = f"{previous.locator} – {chunk.locator}"
-        merged[-1] = PreparedChunk(
-            text=text,
-            heading=heading or None,
-            locator=locator,
-            token_count=previous.token_count + chunk.token_count,
-            content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        )
-    return merged

@@ -353,6 +353,8 @@ Retrieved passages can be turned into natural answers through the central model 
 
 Answers expose `answerable`, `confidence`, retrieval component scores, and section/page locators. Low-confidence searches block dependent workflow actions instead of carrying irrelevant text into tasks or external actions. Query audit events store a SHA-256 fingerprint and length by default; raw query retention requires the explicit `APP_RAG_AUDIT_QUERY_CONTENT=true` setting.
 
+For reproducible public-document tests, known limitations, and safe re-indexing guidance, see the [real-data assessment](docs/real-data-assessment.md). Grounding checks and confidence scores are conservative heuristics, not a guarantee of semantic correctness.
+
 The same gateway provides structured outputs, explicit provider/model selection, request timeouts, bounded retries, output-token limits, cost preflight, and runtime telemetry. OpenAI Responses requests set `store=false`. Deterministic mode remains the default and requires no API key:
 
 ```text

@@ -32,7 +32,7 @@ from app.services.observability import observability_service
 from app.services.object_storage import ObjectStorageError, object_storage_service
 from app.services.policies import policy_service
 from app.services.prompt_guard import prompt_guard_service
-from app.services.retrieval import RankedMatch, hybrid_retrieval_service, retrieval_terms
+from app.services.retrieval import RankedMatch, hybrid_retrieval_service, full_text_terms
 from app.services.security_controls import security_control_service
 
 STOP_WORDS = {
@@ -138,11 +138,15 @@ class RagService:
             except ValueError:
                 pass
 
+        security_control_service.preflight_upload(
+            filename=filename, data=data, actor_id=uploaded_by,
+            organization_id=organization_id,
+        )
         sections = extract_sections(filename=filename, data=data)
         cleaned = _clean_text(joined_text(sections))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
-        security_inspection = security_control_service.inspect_upload(
+        security_inspection = security_control_service.inspect_text(
             filename=filename,
             data=data,
             text=cleaned,
@@ -169,7 +173,7 @@ class RagService:
         object_storage_service.put(storage_key, data, filename=safe_filename)
         storage_backend = get_settings().object_storage_backend
 
-        scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        scan = prompt_guard_service.scan_text(cleaned)
         unsafe_reasons = list(
             dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
         )
@@ -254,11 +258,15 @@ class RagService:
         existing = self.get_document(
             document_id=document_id, organization_id=organization_id
         )
+        security_control_service.preflight_upload(
+            filename=filename, data=data, actor_id=uploaded_by,
+            organization_id=organization_id,
+        )
         sections = extract_sections(filename=filename, data=data)
         cleaned = _clean_text(joined_text(sections))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
-        security_inspection = security_control_service.inspect_upload(
+        security_inspection = security_control_service.inspect_text(
             filename=filename,
             data=data,
             text=cleaned,
@@ -287,7 +295,7 @@ class RagService:
         new_backend = get_settings().object_storage_backend
         object_storage_service.put(new_key, data, filename=safe_filename)
 
-        scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        scan = prompt_guard_service.scan_text(cleaned)
         unsafe_reasons = list(
             dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
         )
@@ -492,11 +500,15 @@ class RagService:
             raise ValueError(
                 "The original uploaded file is missing from object storage."
             ) from exc
+        security_control_service.preflight_upload(
+            filename=document.filename, data=file_data, actor_id=document.document_id,
+            organization_id=organization_id,
+        )
         sections = extract_sections(filename=document.filename, data=file_data)
         cleaned = _clean_text(joined_text(sections))
         if not cleaned:
             raise ValueError("No readable text was found in this file.")
-        security_inspection = security_control_service.inspect_upload(
+        security_inspection = security_control_service.inspect_text(
             filename=document.filename,
             data=file_data,
             text=cleaned,
@@ -512,7 +524,7 @@ class RagService:
         ):
             indexed_chunks = self._prepare_chunks(chunks)
 
-        scan = prompt_guard_service.scan_text(cleaned[:20_000])
+        scan = prompt_guard_service.scan_text(cleaned)
         unsafe_reasons = list(
             dict.fromkeys([*scan.reasons, *security_inspection.unsafe_reasons])
         )
@@ -745,7 +757,7 @@ class RagService:
         role: str,
         organization_id: str,
     ) -> list[RankedMatch]:
-        where = ["d.unsafe = FALSE", "d.organization_id = ?"]
+        where = ["d.unsafe = FALSE", "d.organization_id = ?", "c.organization_id = d.organization_id"]
         params: list[str] = [organization_id]
         if role != "admin":
             where.append("d.classification != ?")
@@ -756,6 +768,7 @@ class RagService:
         current_model = embedding_service.model_for_provider(
             get_settings().embedding_provider
         )
+        lexical_query = " OR ".join(full_text_terms(question))
         with get_connection() as connection:
             rows = connection.execute(
                 f"""
@@ -773,17 +786,19 @@ class RagService:
                 ), lexical AS (
                     SELECT c.chunk_id, c.text, c.heading, c.locator,
                            d.document_id, d.title, d.created_at,
-                           0.0 AS dense_score,
+                           CASE WHEN c.embedding_model = ? THEN
+                               1 - (c.embedding <=> ?::vector)
+                           ELSE NULL END AS dense_score,
                            ts_rank_cd(
                                to_tsvector('english', coalesce(c.heading, '') || ' ' || c.text),
-                               plainto_tsquery('english', ?)
+                               websearch_to_tsquery('english', ?)
                            ) AS lexical_score
                     FROM document_chunks c
                     JOIN documents d ON d.document_id = c.document_id
                     WHERE {' AND '.join(where)}
                       AND to_tsvector(
                           'english', coalesce(c.heading, '') || ' ' || c.text
-                      ) @@ plainto_tsquery('english', ?)
+                      ) @@ websearch_to_tsquery('english', ?)
                     ORDER BY lexical_score DESC
                     LIMIT ?
                 )
@@ -797,27 +812,25 @@ class RagService:
                     current_model,
                     embedding,
                     candidate_limit,
-                    question,
+                    current_model,
+                    embedding,
+                    lexical_query,
                     *params,
-                    question,
+                    lexical_query,
                     candidate_limit,
                 ),
             ).fetchall()
         candidates: dict[str, dict[str, object]] = {}
         dense_scores: dict[str, float] = {}
-        lexical_scores: dict[str, float] = {}
         for row in rows:
             chunk_id = str(row["chunk_id"])
             candidates[chunk_id] = dict(row)
-            if float(row["dense_score"] or 0.0) != 0.0:
+            if row["dense_score"] is not None:
                 dense_scores[chunk_id] = float(row["dense_score"])
-            if float(row["lexical_score"] or 0.0) != 0.0:
-                lexical_scores[chunk_id] = float(row["lexical_score"])
         return hybrid_retrieval_service.rank(
             question=question,
             rows=list(candidates.values()),
             dense_scores=dense_scores,
-            lexical_scores=lexical_scores,
         )
 
     def _sqlite_hybrid_matches(
@@ -827,7 +840,7 @@ class RagService:
         role: str,
         organization_id: str,
     ) -> list[RankedMatch]:
-        where = ["d.unsafe = 0", "d.organization_id = ?"]
+        where = ["d.unsafe = 0", "d.organization_id = ?", "c.organization_id = d.organization_id"]
         params: list[str] = [organization_id]
         if role != "admin":
             where.append("d.classification != ?")
@@ -858,7 +871,7 @@ class RagService:
                     tuple(params),
                 ).fetchall()
             else:
-                terms = retrieval_terms(question)[:20]
+                terms = full_text_terms(question)
                 if not terms:
                     return []
                 match_query = " OR ".join(f'"{term}"' for term in terms)

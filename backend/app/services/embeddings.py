@@ -70,6 +70,12 @@ class EmbeddingService:
                 vectors = self._openai_embed_many(texts=texts, settings=settings)
             else:
                 raise ValueError("APP_EMBEDDING_PROVIDER must be 'local' or 'openai'.")
+            if len(vectors) != len(texts):
+                raise ValueError("Embedding provider returned an incomplete batch.")
+            if any(len(vector) != settings.vector_dimensions for vector in vectors):
+                raise ValueError("Embedding provider returned inconsistent dimensions.")
+            if any(not math.isfinite(value) for vector in vectors for value in vector):
+                raise ValueError("Embedding provider returned non-finite values.")
         except Exception as exc:
             observability_service.record_safely(
                 operation_type="embedding",
@@ -178,7 +184,9 @@ class EmbeddingService:
                     model_name=settings.local_embedding_model,
                     cache_dir=str(cache_dir),
                     threads=settings.local_embedding_threads,
-                    lazy_load=True,
+                    # Initialization happens under the lock, not concurrently on
+                    # the first query/passage generators from separate requests.
+                    lazy_load=False,
                 )
                 model_dimensions = TextEmbedding.get_embedding_size(
                     settings.local_embedding_model
@@ -246,8 +254,13 @@ class EmbeddingService:
             api_key=api_key,
             timeout=settings.openai_embedding_timeout_seconds,
         )
-        response = client.embeddings.create(**request)
+        try:
+            response = client.embeddings.create(**request)
+        finally:
+            client.close()
         ordered = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(len(texts))):
+            raise ValueError("Embedding response indices do not match the input batch.")
         return [list(item.embedding) for item in ordered]
 
     def _normalize_input(self, text: str) -> str:

@@ -1,6 +1,7 @@
 from hashlib import sha256
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.core.rbac import require_roles, require_scope
@@ -55,7 +56,8 @@ async def upload_document(
     _validate_classification(classification)
 
     try:
-        document = rag_service.ingest_file(
+        document = await run_in_threadpool(
+            rag_service.ingest_file,
             filename=file.filename or "uploaded-document.txt",
             data=await _read_upload_limited(file),
             classification=classification,
@@ -97,7 +99,8 @@ async def queue_document_upload(
     require_scope(user.scopes, "documents:write")
     _validate_classification(classification)
     try:
-        job = background_task_service.enqueue_document(
+        job = await run_in_threadpool(
+            background_task_service.enqueue_document,
             filename=file.filename or "uploaded-document.txt",
             data=await _read_upload_limited(file),
             classification=classification,

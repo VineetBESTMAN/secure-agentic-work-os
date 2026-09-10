@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections import Counter
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -9,6 +11,8 @@ from app.core.config import get_settings
 from app.models.schemas import Citation, RagAnswer
 from app.services.model_gateway import model_gateway_service
 from app.services.retrieval import retrieval_terms, term_coverage
+
+NUMBER_PATTERN = re.compile(r"\b\d+(?:[.,]\d+)*\b")
 
 
 class GroundedSupport(BaseModel):
@@ -167,17 +171,29 @@ class GroundedAnswerService:
                     raise ValueError("Every claim must cite only retrieved evidence.")
                 normalized_quote = " ".join(support.quote.split()).casefold()
                 normalized_excerpt = " ".join(excerpt.split()).casefold()
-                if normalized_quote not in normalized_excerpt:
+                if not normalized_quote or normalized_quote not in normalized_excerpt:
                     raise ValueError(
                         "Every claim support quote must occur in its cited evidence."
                     )
                 claim_terms = set(retrieval_terms(claim.text))
                 quote_terms = set(retrieval_terms(support.quote))
-                if claim_terms and len(claim_terms & quote_terms) / len(claim_terms) < 0.2:
+                normalized_claim = " ".join(claim.text.split()).casefold()
+                exact_claim = normalized_claim.rstrip(".!?") in normalized_excerpt
+                if not exact_claim and (
+                    not claim_terms
+                    or len(claim_terms & quote_terms) / len(claim_terms) < 0.75
+                ):
                     raise ValueError("Every claim must be substantively supported by its quote.")
+                if not set(NUMBER_PATTERN.findall(claim.text)) <= set(NUMBER_PATTERN.findall(support.quote)):
+                    raise ValueError("Claim numbers must appear in the supporting quote.")
+                negatives = set(retrieval_terms("not never cannot prohibited forbidden"))
+                if not exact_claim and bool(claim_terms & negatives) != bool(quote_terms & negatives):
+                    raise ValueError("Claim polarity must agree with its supporting quote.")
             supporting_text = " ".join(
                 [claim.text, *(support.quote for support in claim.supports)]
             )
+            if not GroundedAnswerService._matches_answer_type(question, claim.text):
+                raise ValueError("Evidence does not contain the requested kind of answer.")
             if (
                 term_coverage(question, supporting_text)
                 < settings.rag_minimum_term_coverage
@@ -188,17 +204,43 @@ class GroundedAnswerService:
         self, question: str, citations: list[Citation]
     ) -> GroundedGeneration:
         settings = get_settings()
-        candidates: list[tuple[float, float, int, str, str]] = []
+        passages = [
+            (ci, si, sentence, citation)
+            for ci, citation in enumerate(citations) if citation.chunk_id
+            for si, sentence in enumerate(self._passages(citation.excerpt))
+        ]
+        query_terms = set(retrieval_terms(question)) - {"long"}
+        frequencies = Counter(
+            term for _, _, sentence, _ in passages for term in set(retrieval_terms(sentence))
+        )
+        weights = {term: 1 + math.log(1 + len(passages) / (1 + frequencies[term]))
+                   for term in query_terms}
+
+        def coverage(text: str) -> float:
+            terms = set(retrieval_terms(text))
+            return sum(weight for term, weight in weights.items() if term in terms) / max(1, sum(weights.values()))
+
+        candidates: list[tuple[float, float, int, int, str, str]] = []
         for citation_index, citation in enumerate(citations):
             if citation.chunk_id is None:
                 continue
-            sentences = re.split(r"(?<=[.!?])\s+|\n+", citation.excerpt)
+            sentences = self._passages(citation.excerpt)
             for sentence_index, sentence in enumerate(sentences):
                 cleaned = sentence.strip()
                 if not cleaned:
                     continue
-                relevance = term_coverage(
-                    question,
+                if not self._matches_answer_type(question, cleaned):
+                    continue
+                body_relevance = coverage(cleaned)
+                if body_relevance == 0:
+                    continue
+                field = re.match(r'^"([^"\n]+)"\s*:\s*\S', cleaned)
+                field_terms = set(retrieval_terms(field.group(1))) if field else set()
+                if field_terms and field_terms <= query_terms and coverage(citation.title) > 0:
+                    # A matching JSON key in the named file is direct evidence,
+                    # even when its compact value repeats few question words.
+                    body_relevance = max(body_relevance, 0.5)
+                relevance = coverage(
                     " ".join(
                         part
                         for part in (citation.title, citation.heading, cleaned)
@@ -208,21 +250,19 @@ class GroundedAnswerService:
                 citation_score = citation.score if citation.score is not None else 1.0
                 candidates.append(
                     (
-                        relevance,
+                        0.7 * body_relevance + 0.3 * relevance,
                         citation_score,
                         -citation_index,
+                        -sentence_index,
                         cleaned,
                         citation.chunk_id,
                     )
                 )
-                if sentence_index >= 39:
-                    break
         if not candidates:
             return GroundedGeneration(insufficient_evidence=True)
 
         candidates.sort(reverse=True)
-        relevance, citation_score, _, sentence, chunk_id = candidates[0]
-        citation = next(item for item in citations if item.chunk_id == chunk_id)
+        relevance, citation_score, _, _, sentence, chunk_id = candidates[0]
         if (
             citation_score < settings.rag_minimum_score
             or relevance < settings.rag_minimum_term_coverage
@@ -238,6 +278,61 @@ class GroundedAnswerService:
                 )
             ]
         )
+
+    @staticmethod
+    def _matches_answer_type(question: str, passage: str) -> bool:
+        """Conservative shape checks, not a semantic entailment guarantee."""
+        question = question.casefold()
+        for literal in re.findall(r"(?<!\w)\.[a-z][a-z0-9_-]*", question):
+            if not re.search(re.escape(literal) + r"(?![\w-])", passage, re.I):
+                return False
+        if re.match(r"(?:can|may|could)\b", question):
+            if not re.search(r"\b(?:may|can|cannot|must|shall|allowed|permitted|prohibited|supports?|enables?)\b", passage, re.I):
+                return False
+        if re.search(r"\b(price|cost|fine|dollars?|usd)\b", question):
+            if not re.search(r"(?:[$€£]\s*\d|\d[\d,.]*\s*(?:dollars?|usd|euros?|pounds?)\b|\bfree\b|\bno (?:cost|charge|fine)\b)", passage, re.I):
+                return False
+        if re.search(r"\b(percentage|percent|uptime)\b", question):
+            if not re.search(r"\d[\d.]*\s*(?:%|percent)", passage, re.I):
+                return False
+        if "how long" in question:
+            if not re.search(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?)\b", passage, re.I):
+                return False
+        if "command" in question and "build" in question:
+            if not re.search(r"\b(?:build|compile|tsc)\b", passage, re.I):
+                return False
+            if not re.search(r"(?:`|\"[^\"]+\"\s*:|\b(?:npm|pnpm|yarn|make|cmake|cargo|tsc|python|bash|sh|mvn|gradle)\b)", passage, re.I):
+                return False
+        return True
+
+    @staticmethod
+    def _passages(excerpt: str) -> list[str]:
+        """Preserve lists/code, join prose soft wraps, and bound exact support quotes."""
+        passages: list[str] = []
+        for paragraph in re.split(r"\n\s*\n", excerpt):
+            lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+            structured = any(re.match(r'^(?:[#`{}\[\]]|[-*] |"[^"\n]+"\s*:)', line) for line in lines)
+            prose = " ".join(lines)
+            # Retain adjacent qualifiers and exceptions when the entire paragraph fits.
+            units = lines if structured else ([prose] if len(prose) <= 480 else re.split(r"(?<=[.!?])\s+", prose))
+            for unit in units:
+                # Sliding character windows avoid Pydantic errors on long unpunctuated text.
+                words = unit.split()
+                start = 0
+                while start < len(words):
+                    end = start
+                    size = 0
+                    while end < len(words) and size + len(words[end]) + 1 <= 480:
+                        size += len(words[end]) + 1
+                        end += 1
+                    if end == start:
+                        start += 1  # An unbroken >480-char token cannot be a useful quote.
+                        continue
+                    passages.append(" ".join(words[start:end]))
+                    if end == len(words):
+                        break
+                    start = max(start + 1, end - 12)
+        return passages
 
     @staticmethod
     def _confidence(

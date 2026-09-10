@@ -417,7 +417,8 @@ class RagEvaluationService:
             corpus_embeddings = stored_embeddings
         else:
             corpus_embeddings = embedding_service.embed_many(
-                [row["text"] for row in corpus],
+                [(f"Section: {row['heading']}\n" if row["heading"] else "") + row["text"]
+                 for row in corpus],
                 provider=provider,
                 input_type="document",
             )
@@ -722,7 +723,7 @@ class RagEvaluationService:
         role: str,
         organization_id: str = "org_default",
     ) -> list:
-        where = ["d.unsafe = ?", "d.organization_id = ?"]
+        where = ["d.unsafe = ?", "d.organization_id = ?", "c.organization_id = d.organization_id"]
         params: list[object] = [False, organization_id]
         if role != "admin":
             where.append("d.classification != ?")

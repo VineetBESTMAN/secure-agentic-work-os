@@ -13,7 +13,14 @@ from pathlib import Path
 def _configure(repo_root: Path, work_dir: Path, cache_dir: Path) -> None:
     backend = repo_root / "backend"
     sys.path.insert(0, str(backend))
-    os.environ.pop("DATABASE_URL", None)
+    from app.core.config import Settings
+    for field in Settings.model_fields.values():
+        if isinstance(field.validation_alias, str):
+            os.environ.pop(field.validation_alias, None)
+    Settings.model_config["env_file"] = None
+    for name in list(os.environ):
+        if name.startswith(("APP_", "OPENAI_", "DATABASE_", "REDIS_")):
+            del os.environ[name]
     os.environ["APP_DATABASE_PATH"] = str(work_dir / "evaluation.db")
     os.environ["APP_LANGGRAPH_SQLITE_PATH"] = str(work_dir / "langgraph.db")
     os.environ["APP_UPLOAD_DIR"] = str(work_dir / "uploads")
@@ -27,6 +34,7 @@ def _configure(repo_root: Path, work_dir: Path, cache_dir: Path) -> None:
     os.environ["APP_LOCAL_EMBEDDING_BACKEND"] = "fastembed"
     os.environ["APP_LOCAL_EMBEDDING_MODEL"] = "BAAI/bge-small-en-v1.5"
     os.environ["APP_LOCAL_EMBEDDING_CACHE_DIR"] = str(cache_dir)
+    os.environ["APP_LOCAL_EMBEDDING_THREADS"] = "2"
 
 
 def _headers(client, email: str = "admin@demo.local") -> dict[str, str]:
@@ -39,9 +47,7 @@ def _headers(client, email: str = "admin@demo.local") -> dict[str, str]:
 
 
 def run(repo_root: Path, cache_dir: Path) -> dict[str, object]:
-    with tempfile.TemporaryDirectory(
-        prefix="workos-rag-benchmark-", ignore_cleanup_errors=True
-    ) as temporary:
+    with tempfile.TemporaryDirectory(prefix="workos-rag-benchmark-") as temporary:
         work_dir = Path(temporary)
         _configure(repo_root, work_dir, cache_dir)
 

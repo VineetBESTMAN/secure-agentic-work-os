@@ -9,7 +9,7 @@ from app.services.embeddings import embedding_service
 
 
 TOKEN_PATTERN = re.compile(
-    r"[a-zA-Z0-9](?:[a-zA-Z0-9_+.-]*[a-zA-Z0-9])?"
+    r"[^\W_](?:[\w+.-]*[^\W_])?", re.UNICODE
 )
 STOP_WORDS = {
     "a",
@@ -52,6 +52,8 @@ STOP_WORDS = {
     "who",
     "why",
     "with",
+    "should",
+    "normally",
 }
 
 
@@ -90,11 +92,22 @@ def _stem(token: str) -> str:
 
 
 def retrieval_terms(text: str) -> list[str]:
-    return [
-        _stem(token)
-        for token in TOKEN_PATTERN.findall(text.casefold())
-        if token not in STOP_WORDS
-    ]
+    terms: list[str] = []
+    for token in TOKEN_PATTERN.findall(text.casefold()):
+        # Match human questions to filenames/identifiers without losing exact tokens.
+        parts = re.split(r"[-./]", token)
+        for part in dict.fromkeys([token, *parts]):
+            if part and part not in STOP_WORDS:
+                terms.append(_stem(part))
+    return terms
+
+
+def full_text_terms(text: str) -> list[str]:
+    """Let the database tokenizer stem its input; never send custom stems to FTS."""
+    return list(dict.fromkeys(
+        term for term in re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
+        if term not in STOP_WORDS
+    ))[:20]
 
 
 def term_coverage(question: str, evidence: str) -> float:
